@@ -7,10 +7,11 @@
 %   p : position in NED
 %   v : velocity in NED
 %   R : body-to-NED rotation matrix
+%   Omega : body angular velocity expressed in body frame
 %
 % Input:
-%   aT : thrust acceleration magnitude
-%   w  : commanded body angular rate
+%   T   : total thrust force
+%   tau : body-frame moment
 %
 % Reference interface:
 %   ref.p   position
@@ -24,25 +25,30 @@ clear; clc; close all;
 %% 0. Parameters
 par.g = 9.81;
 par.e3 = [0;0;1];
+par.m = 1.0;
+par.J = diag([0.07, 0.07, 0.12]);
 
 par.dt = 0.01;          % 100 Hz
-par.Tend = 7.2;
+par.Tend = 12.0;
+par.trajTimeScale = 1.0;    % >1 slows the reference trajectory
 
 % Available choices:
+%   "figure8_horizontal"
 %   "minsnap_helix_flip"
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
 par.trajName = "minsnap_helix_flip";
 
-% Controller gains
-par.Kp = diag([35, 45, 55]);
-par.Kv = diag([14, 16, 18]);
-par.kR = 35;
+% Simple controller gains
+par.Kp = diag([20, 20, 25]);
+par.Kv = diag([9, 9, 10]);
+par.KR = 35*eye(3);
+par.KOmega = 35*par.J;
 
-% Saturation
-par.aTmax = 6*par.g;
-par.wmax = 60;          % rad/s
+% Actuator limits
+par.Tmax = 4*9.81;
+par.tauMax = [8; 8; 8];
 
 % Initial condition
 par.startOnReference = true;
@@ -51,6 +57,11 @@ par.startOnReference = true;
 par.poseEvery = 0.20;       % seconds
 par.bodyAxisScale = 0.25;   % meters
 par.poseSource = "actual";  % "actual" or "desired"
+
+% Post-simulation 3D animation
+par.enableAnimation = true;
+par.animationSpeed = 1;       % 1.0 = real time
+par.animationFrameDt = 0.02;    % seconds
 
 %% ========================================================================
 %% 1. Build trajectory
@@ -66,10 +77,12 @@ if par.startOnReference
     x.p = ref0.p;
     x.v = ref0.v;
     x.R = R0;
+    x.Omega = zeros(3,1);
 else
     x.p = [0;0;0];
     x.v = [0;0;0];
     x.R = eye(3);
+    x.Omega = zeros(3,1);
 end
 
 %% ========================================================================
@@ -85,12 +98,13 @@ log.ad = zeros(3,N);
 
 log.R = zeros(3,3,N);
 log.Rd = zeros(3,3,N);
+log.Omega = zeros(3,N);
 
 log.euler = zeros(3,N);
 log.eulerD = zeros(3,N);
 
-log.aT = zeros(1,N);
-log.wcmd = zeros(3,N);
+log.T = zeros(1,N);
+log.tau = zeros(3,N);
 
 %% ========================================================================
 %% 4. Simulation loop
@@ -98,7 +112,7 @@ for k = 1:N
     t = time(k);
 
     ref = traj.eval(t);
-    u = controllerPDFlatness(x, ref, par);
+    u = controllerPDGeometric(x, ref, par);
 
     log.p(:,k) = x.p;
     log.v(:,k) = x.v;
@@ -108,25 +122,35 @@ for k = 1:N
 
     log.R(:,:,k) = x.R;
     log.Rd(:,:,k) = u.Rd;
+    log.Omega(:,k) = x.Omega;
 
     log.euler(:,k) = rotm2eulZYX(x.R);
     log.eulerD(:,k) = rotm2eulZYX(u.Rd);
 
-    log.aT(k) = u.aT;
-    log.wcmd(:,k) = u.w;
+    log.T(k) = u.T;
+    log.tau(:,k) = u.tau;
 
-    x = stepModelBodyRate(x, u, par);
+    x = stepModelRigidBodyRK4(x, u, par);
 end
 
 %% ========================================================================
 %% 5. Plot
 plotResults(time, log, par, traj);
 
+if par.enableAnimation
+    animateTrajectory3D(time, log, par, traj);
+end
+
 %% ========================================================================
 %% Trajectory factory
 function traj = makeTrajectory(par)
 
     switch par.trajName
+
+        case "figure8_horizontal"
+            traj.name = "figure8_horizontal";
+            traj.Tend = 12.0;
+            traj.eval = @(t) evalFigure8Horizontal(t);
 
         case "helix_flip"
             traj.name = "helix_flip";
@@ -152,6 +176,59 @@ function traj = makeTrajectory(par)
         otherwise
             error("Unknown trajectory name.");
     end
+
+    traj = scaleTrajectoryTime(traj, par.trajTimeScale);
+end
+
+function traj = scaleTrajectoryTime(traj, scale)
+
+    if scale <= 0
+        error("Trajectory time scale must be positive.");
+    end
+
+    if abs(scale - 1) < 1e-12
+        return;
+    end
+
+    baseEval = traj.eval;
+    baseTend = traj.Tend;
+
+    traj.Tend = scale*baseTend;
+    traj.name = traj.name + "_timeScale_" + string(scale);
+    traj.eval = @(t) evalScaledTrajectory(baseEval, t, scale, baseTend);
+end
+
+function ref = evalScaledTrajectory(baseEval, t, scale, baseTend)
+
+    tBase = min(max(t/scale, 0), baseTend);
+    ref = baseEval(tBase);
+    ref.v = ref.v/scale;
+    ref.a = ref.a/(scale^2);
+end
+
+%% ========================================================================
+%% Analytic horizontal figure-eight
+function ref = evalFigure8Horizontal(t)
+
+    Ax = 4.0;
+    Ay = 2.5;
+    h0 = 3.0;
+    Tfig = 12.0;
+    Om = 2*pi/Tfig;
+
+    ref.p = [Ax*sin(Om*t);
+             Ay*sin(2*Om*t);
+            -h0];
+
+    ref.v = [Ax*Om*cos(Om*t);
+             2*Ay*Om*cos(2*Om*t);
+             0];
+
+    ref.a = [-Ax*Om^2*sin(Om*t);
+             -4*Ay*Om^2*sin(2*Om*t);
+             0];
+
+    ref.psi = atan2(ref.v(2), ref.v(1));
 end
 
 %% ========================================================================
@@ -162,7 +239,7 @@ function ref = evalHelixFlip(t)
     Ay = 0.80;
     Az = 0.80;
     h0 = 1.30;
-    Tturn = 1.20;
+    Tturn = 1.65;
     Om = 2*pi/Tturn;
 
     h = h0 + Az*cos(Om*t);
@@ -189,7 +266,7 @@ function ref = evalFlipLoopSine(t)
     Ay = 1.0;
     Az = 1.5;
     h0 = 1.5;
-    Tloop = 1.4;
+    Tloop = 1.90;
     Om = 2*pi/Tloop;
 
     h = h0 + Az*cos(Om*t);
@@ -242,7 +319,7 @@ function data = buildMinSnapHelixFlip()
     Az = 0.80;
     h0 = 1.30;
 
-    Tturn = 1.20;
+    Tturn = 1.65;
     Nturn = 6;
     NsegPerTurn = 8;
 
@@ -307,39 +384,41 @@ end
 
 %% ========================================================================
 %% Controller layer
-function u = controllerPDFlatness(x, ref, par)
+function u = controllerPDGeometric(x, ref, par)
 
     ep = x.p - ref.p;
     ev = x.v - ref.v;
 
     aCmd = ref.a - par.Kp*ep - par.Kv*ev;
 
-    [Rd, aT] = desiredAttitudeFromAccel(aCmd, ref.psi, par);
+    [Rd, ~] = desiredAttitudeFromAccel(aCmd, ref.psi, par);
 
-    eR = LogSO3(x.R' * Rd);
-    omegaCmd = par.kR * eR;
+    rErr = LogSO3(x.R' * Rd);
 
-    omegaCmd = saturateVector(omegaCmd, par.wmax);
-    aT = min(max(aT, 0), par.aTmax);
+    tau = cross(x.Omega, par.J*x.Omega) ...
+        + par.KR*rErr - par.KOmega*x.Omega;
 
-    u.aT = aT;
-    u.w = omegaCmd;
+    c = par.g*par.e3 - aCmd;
+    T = par.m*dot(c, x.R*par.e3);
+
+    u.T = min(max(T, 0), par.Tmax);
+    u.tau = saturateVector(tau, par.tauMax);
     u.Rd = Rd;
 end
 
 %% ========================================================================
 %% Flatness attitude map layer
-function [Rd, aT] = desiredAttitudeFromAccel(aCmd, psi, par)
+function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par)
 
     c = par.g*par.e3 - aCmd;
-    aT = norm(c);
+    T = par.m*norm(c);
 
-    if aT < 1e-9
+    if T < 1e-9
         c = par.g*par.e3;
-        aT = norm(c);
+        T = par.m*norm(c);
     end
 
-    b3d = c/aT;
+    b3d = c/norm(c);
 
     headingAxis = [cos(psi); sin(psi); 0];
 
@@ -358,14 +437,43 @@ end
 
 %% ========================================================================
 %% Quadrotor model layer
-function xNext = stepModelBodyRate(x, u, par)
+function xNext = stepModelRigidBodyRK4(x, u, par)
 
-    pDot = x.v;
-    vDot = par.g*par.e3 - u.aT*x.R*par.e3;
+    h = par.dt;
 
-    xNext.p = x.p + par.dt*pDot;
-    xNext.v = x.v + par.dt*vDot;
-    xNext.R = x.R * ExpSO3(u.w*par.dt);
+    k1 = rigidBodyDerivative(x, u, par);
+    k2 = rigidBodyDerivative(addStateDerivative(x, k1, 0.5*h), u, par);
+    k3 = rigidBodyDerivative(addStateDerivative(x, k2, 0.5*h), u, par);
+    k4 = rigidBodyDerivative(addStateDerivative(x, k3, h), u, par);
+
+    xNext.p = x.p + h/6*(k1.p + 2*k2.p + 2*k3.p + k4.p);
+    xNext.v = x.v + h/6*(k1.v + 2*k2.v + 2*k3.v + k4.v);
+    xNext.R = x.R + h/6*(k1.R + 2*k2.R + 2*k3.R + k4.R);
+    xNext.Omega = x.Omega + h/6*(k1.Omega + 2*k2.Omega + 2*k3.Omega + k4.Omega);
+
+    xNext.R = projectSO3(xNext.R);
+end
+
+function xTmp = addStateDerivative(x, dx, h)
+
+    xTmp.p = x.p + h*dx.p;
+    xTmp.v = x.v + h*dx.v;
+    xTmp.R = x.R + h*dx.R;
+    xTmp.Omega = x.Omega + h*dx.Omega;
+end
+
+function dx = rigidBodyDerivative(x, u, par)
+
+    dx.p = x.v;
+    dx.v = par.g*par.e3 - u.T/par.m*x.R*par.e3;
+    dx.R = x.R*hat(x.Omega);
+    dx.Omega = par.J \ (u.tau - cross(x.Omega, par.J*x.Omega));
+end
+
+function R = projectSO3(R)
+
+    [U,~,V] = svd(R);
+    R = U*diag([1, 1, det(U*V')])*V';
 end
 
 %% ========================================================================
@@ -643,21 +751,6 @@ function v = vee(S)
     v = [S(3,2); S(1,3); S(2,1)];
 end
 
-function R = ExpSO3(phi)
-
-    theta = norm(phi);
-
-    if theta < 1e-10
-        R = eye(3) + hat(phi);
-        return;
-    end
-
-    u = phi/theta;
-    U = hat(u);
-
-    R = eye(3) + sin(theta)*U + (1 - cos(theta))*U*U;
-end
-
 function phi = LogSO3(R)
 
     c = (trace(R) - 1)/2;
@@ -683,12 +776,16 @@ end
 
 function y = saturateVector(x, xmax)
 
-    nx = norm(x);
+    if isscalar(xmax)
+        nx = norm(x);
 
-    if nx > xmax
-        y = x * xmax/nx;
+        if nx > xmax
+            y = x * xmax/nx;
+        else
+            y = x;
+        end
     else
-        y = x;
+        y = min(max(x, -xmax), xmax);
     end
 end
 
