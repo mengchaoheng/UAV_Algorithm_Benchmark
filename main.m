@@ -33,11 +33,12 @@ end
 %% 0. Parameters
 par.g = 9.81;
 par.e3 = [0;0;1];
-par.m = 1.0;
-par.J = diag([0.07, 0.07, 0.12]);
+% Sun et al. / Agilicious Kingfisher platform, Table II.
+par.m = 0.752;
+par.J = diag([0.0025, 0.0021, 0.0043]);
 
 par.dt = 0.01;          % 100 Hz
-par.Tend = 20.0;
+par.Tend = 16.0;
 par.integratorName = "ode45";  % "ode45" or "lie_rk4"
 
 % Reference time scaling.
@@ -52,7 +53,7 @@ par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the si
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "figure8_horizontal";
+par.trajName = "helix_flip";
 
 % One knob for all trajectory shapes. The factory below converts it into
 % periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
@@ -60,15 +61,18 @@ par.trajIntensity = 1;  % 0 = gentle, 1 = near the actuator envelope
 par.flipTurns = 3;         % flip trajectories: turns during the second half
 
 % controller
-% "geometric", "faessler", "lee", "johnson_beard", "sun_dfbc", "sun_dfbc_indi"
-% "lu_on_manifold_lqr", "sun_linear_mpc", "sun_nmpc_full", "sun_linear_mpc_indi"
+% "geometric", "faessler", "lee", "johnson_beard"
+% "sun_dfbc", "sun_dfbc_indi"
+% "lu_on_manifold_lqr", "sun_nmpc", "sun_nmpc_indi"
 % "geometric_indi", "tal_karaman"
-par.controllerName = "geometric";
+par.controllerName = "geometric_indi";
 % Simple controller gains
 par.Kp = diag([20, 20, 25]);
 par.Kv = diag([9, 9, 10]);
-par.KR = 35*eye(3);
-par.KOmega = 35*par.J;
+% Attitude gains are moment gains. Keep them inertia-scaled so changing the
+% platform does not silently change the angular closed-loop dynamics.
+par.KR = 600*par.J;
+par.KOmega = 50*par.J;
 
 % Controller-specific gain namespaces. The base gains above remain as
 % convenient defaults, but controller code should use its own namespace so
@@ -99,48 +103,46 @@ par.mpc.P = par.mpc.Q;
 par.mpc.omegaMax = deg2rad(800);
 par.mpc.KOmega = par.KOmega;
 
-% Sun/Foehn/Agilicious MPC defaults. These are the C++ defaults matching the
-% paper's Table I for the state cost; the rotor-thrust input weight R=6 is
-% projected to this benchmark's collective-thrust channel where possible.
+% Sun et al. 2022, Table I and Table II controller/platform parameters.
+% The benchmark plant above uses the same Kingfisher mass/inertia, and Sun
+% control allocation/NMPC inputs are single-rotor thrusts u = [u1;u2;u3;u4],
+% as in Eq. (4)-(12).
 par.sun.N = 20;
 par.sun.dt = 0.05;
-par.sun.Qpos = diag([200, 200, 500]);
-par.sun.Qatt = diag([5, 5, 200]);
-par.sun.Qvel = eye(3);
-par.sun.Qomega = eye(3);
-par.sun.Rrotor = 6*eye(4);
-par.sun.Rcollective = par.sun.Rrotor(1,1)/4;
-% The simplified Sun NMPC uses virtual inputs [collective acceleration; body
-% rate], so only the collective channel maps directly from rotor R.
-par.sun.Rvirtual = diag([par.sun.Rcollective, 1, 1, 1]);
-par.sun.Q = blkdiag(par.sun.Qpos, par.sun.Qvel, par.sun.Qatt);
-par.sun.P = par.sun.Q;
-par.sun.omegaMax = par.mpc.omegaMax;
-par.sun.Kp = par.Kp;
-par.sun.Kv = par.Kv;
-par.sun.KR = par.KR;
-par.sun.KOmega = par.KOmega;
-
-% Full nonlinear MPC replica, using MATLAB fmincon instead of ACADO/acados.
-% Foehn/Sun use N=20, dt=0.05, single-rotor thrust inputs, and RTI SQP.
-% Here the dynamics are full nonlinear, while control allocation is simplified
-% to total thrust and body moments [T; tau]. MATLAB fmincon is far slower
-% than ACADO/acados, so the default full-NMPC path uses single shooting and
-% falls back to sun_linear_mpc if the nonlinear solve fails.
-par.sunFull.N = par.sun.N;
-par.sunFull.dt = par.sun.dt;
-par.sunFull.solvePeriod = 0.10;
-par.sunFull.maxIterations = 2;
-par.sunFull.maxFunctionEvaluations = 400;
-par.sunFull.Qpos = par.sun.Qpos;
-par.sunFull.Qatt = par.sun.Qatt;
-par.sunFull.Qvel = par.sun.Qvel;
-par.sunFull.Qomega = par.sun.Qomega;
-% Agilicious uses R=6 for each rotor thrust; equal-rotor collective gives 6/4.
-% Moment channels have no exact equivalent after skipping allocation, so they
-% keep a dimensionless regularizer derived from the C++ omega weight.
-par.sunFull.R = diag([par.sun.Rcollective, 1, 1, 1]);
-par.sunFull.RtauNorm = 0.5;
+par.sun.Qxi = diag([200, 200, 500]);
+par.sun.Qv = eye(3);
+par.sun.Qq = diag([5, 5, 200]);
+par.sun.QOmega = eye(3);
+par.sun.Qu = 6*eye(4);
+par.sun.QN = blkdiag(par.sun.Qxi, par.sun.Qv, par.sun.Qq, par.sun.QOmega);
+par.sun.Kxi = diag([10, 10, 10]);
+par.sun.Kv = diag([6, 6, 6]);
+par.sun.KqRed = diag([150, 150, 0]);
+par.sun.kqYaw = 3;
+par.sun.KOmega = diag([20, 20, 8]);
+par.sun.W = diag([0.001, 10, 10, 0.1]);
+par.sun.wlsAllocPath = "/Users/mchmini/Proj/control_allocation/control_allocation_lib/qcat/QCAT/qcat";
+par.sun.tBM = [ 0.075, -0.075, -0.075,  0.075;
+               -0.100,  0.100, -0.100,  0.100;
+                0.000,  0.000,  0.000,  0.000];
+par.sun.kappa = 0.022;
+par.sun.uMin = zeros(4,1);
+par.sun.uMax = 8.5*ones(4,1);
+par.sun.omegaMax = [10; 10; 4];
+acadosSourceDir = string(getenv("ACADOS_SOURCE_DIR"));
+if strlength(acadosSourceDir) == 0
+    acadosSourceDir = "/private/tmp/acados";
+end
+par.sun.acadosSourceDir = acadosSourceDir;
+par.sun.acadosToolsPath = fullfile(pwd, "tools");
+sunPython = string(getenv("SUN_NMPC_PYTHON"));
+if strlength(sunPython) == 0 ...
+        && exist("/Users/mchmini/.pyenv/versions/3.12.8/bin/python3", "file") == 2
+    sunPython = "/Users/mchmini/.pyenv/versions/3.12.8/bin/python3";
+end
+par.sun.pythonExecutable = sunPython;
+par.sun.solvePeriod = par.sun.dt;
+par.sun.printSolverTiming = false;
 
 % Geometric INDI gains.
 par.indi.Kp = par.Kp;
@@ -190,22 +192,24 @@ par.tal.alphaRefMax = 500;
 par.tal.omegaRefMax = 80;
 par.tal.flatnessRcondMin = 1e-6;
 
-% Actuator limits
-par.Tmax = 4*9.81;
-par.tauMax = [8; 8; 8];
+% Actuator limits from four Kingfisher rotors, u_i in [0, 8.5] N.
+par.Tmax = 4*8.5;
+par.tauMax = [1.70; 1.275; 0.374];
 
 % Additive plant disturbances. The force disturbance is expressed in inertial
 % NED coordinates [N]; the moment disturbance is expressed in the body frame
 % [N*m], matching the plant translational and rotational equations below.
 % The default is disabled, so normal single-run behavior is unchanged.
 par.disturbance.enabled = false;
-par.disturbance.type = "none";       % "none" or "sin"
+par.disturbance.type = "none";       % "none", "constant", or "sin"
 par.disturbance.forceAmp = 0;        % scalar or 3x1 per-axis amplitude [N]
 par.disturbance.momentAmp = 0;       % scalar or 3x1 per-axis amplitude [N*m]
 par.disturbance.forceFreq = [0.31; 0.47; 0.61];   % sinusoid frequencies [Hz]
 par.disturbance.momentFreq = [0.43; 0.59; 0.73];  % sinusoid frequencies [Hz]
 par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
 par.disturbance.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
+par.disturbance.startTime = 0;
+par.disturbance.endTime = inf;
 
 % Initial condition
 par.startOnReference = true;
@@ -269,11 +273,11 @@ log.T = zeros(1,N);
 log.tau = zeros(3,N);
 log.forceDist = zeros(3,N);
 log.momentDist = zeros(3,N);
-log.sunFullUsedFallback = false(1,N);
-log.sunFullSolved = false(1,N);
-log.sunFullFallbackCode = zeros(1,N);
-log.sunFullExitflag = nan(1,N);
-log.sunFullCostRatio = nan(1,N);
+log.sunNMPCCached = false(1,N);
+log.sunNMPCSolved = false(1,N);
+log.sunNMPCStatusCode = zeros(1,N);
+log.sunNMPCExitflag = nan(1,N);
+log.sunNMPCSolveTime = nan(1,N);
 
 %% ========================================================================
 %% 4. Simulation loop
@@ -300,26 +304,24 @@ for k = 1:N
     log.tau(:,k) = u.tau;
     [log.forceDist(:,k), log.momentDist(:,k)] = disturbanceAtTime(t, par);
 
-    if isfield(u, 'sunFullUsedFallback')
-        log.sunFullUsedFallback(k) = u.sunFullUsedFallback;
-        log.sunFullSolved(k) = u.sunFullSolved;
-        log.sunFullFallbackCode(k) = u.sunFullFallbackCode;
-        log.sunFullExitflag(k) = u.sunFullExitflag;
-        log.sunFullCostRatio(k) = u.sunFullCostRatio;
+    if isfield(u, 'sunNMPCSolved')
+        log.sunNMPCCached(k) = u.sunNMPCCached;
+        log.sunNMPCSolved(k) = u.sunNMPCSolved;
+        log.sunNMPCStatusCode(k) = u.sunNMPCStatusCode;
+        log.sunNMPCExitflag(k) = u.sunNMPCExitflag;
+        log.sunNMPCSolveTime(k) = u.sunNMPCSolveTime;
     end
 
     x = stepModel(x, u, par, t);
 end
 
-if par.controllerName == "sun_nmpc_full"
-    nFallback = nnz(log.sunFullUsedFallback);
-    nScheduled = nnz(log.sunFullFallbackCode == 2);
-    nSolverFallback = nnz(log.sunFullFallbackCode == 1 ...
-        | log.sunFullFallbackCode == 3 ...
-        | log.sunFullFallbackCode == 4);
-    fprintf(['sun_nmpc_full fallback: %d/%d total, ' ...
-        '%d scheduled skips, %d solver-triggered. Optimized commands: %d.\n'], ...
-        nFallback, N, nScheduled, nSolverFallback, nnz(log.sunFullSolved));
+if any(par.controllerName == ["sun_nmpc", "sun_nmpc_indi"])
+    nCached = nnz(log.sunNMPCCached);
+    nSolverFailures = nnz(log.sunNMPCStatusCode ~= 0 & ~log.sunNMPCCached);
+    fprintf(['sun_nmpc solve status: %d optimized solves, ' ...
+        '%d cached steps, %d nonzero statuses, mean solve %.3f s.\n'], ...
+        nnz(log.sunNMPCSolved), nCached, nSolverFailures, ...
+        mean(log.sunNMPCSolveTime(log.sunNMPCSolved), 'omitnan'));
 end
 
 %% ========================================================================
@@ -391,7 +393,10 @@ function traj = applyTrajectoryProgress(traj, par)
             end
 
             traj.Tend = scale*baseTend;
-            traj.eval = @(t) evalProgressTrajectory(baseEval, t/scale, 1/scale, 0, baseTend);
+            traj.eval = @(t) evalProgressTrajectory( ...
+                baseEval, t/scale, 1/scale, 0, baseTend);
+            traj.evalPredict = @(t) evalProgressTrajectory( ...
+                baseEval, t/scale, 1/scale, 0, baseTend, true);
 
             if abs(scale - 1) >= 1e-12
                 traj.name = traj.name + "_timeScale_" + string(scale);
@@ -407,22 +412,39 @@ function traj = applyTrajectoryProgress(traj, par)
             traj.Tend = par.Tend;
             traj.name = traj.name + "_scaleRange_" + string(scaleRange(1)) ...
                       + "_" + string(scaleRange(2));
-            traj.eval = @(t) evalScaleRangeTrajectory(baseEval, baseTend, t, traj.Tend, scaleRange);
+            traj.eval = @(t) evalScaleRangeTrajectory( ...
+                baseEval, baseTend, t, traj.Tend, scaleRange);
+            traj.evalPredict = @(t) evalScaleRangeTrajectory( ...
+                baseEval, baseTend, t, traj.Tend, scaleRange, true);
 
         otherwise
             error("Unknown progress mode.");
     end
 end
 
-function ref = evalScaleRangeTrajectory(baseEval, baseTend, t, simTend, scaleRange)
+function ref = evalScaleRangeTrajectory( ...
+        baseEval, baseTend, t, simTend, scaleRange, allowPredict)
 
-    alpha = clampScalar(t/simTend, 0, 1);
+    if nargin < 6
+        allowPredict = false;
+    end
+
     scale0 = scaleRange(1);
     scale1 = scaleRange(2);
-
-    tClip = alpha*simTend;
     scaleDot = (scale1 - scale0)/simTend;
-    scale = scale0 + scaleDot*tClip;
+
+    if allowPredict && t > simTend
+        tClip = simTend;
+        scale = scale1;
+    else
+        alpha = clampScalar(t/simTend, 0, 1);
+        tClip = alpha*simTend;
+        scale = scale0 + scaleDot*tClip;
+    end
+
+    if scale <= 0
+        error("Trajectory time scale became non-positive.");
+    end
 
     % The scale is instantaneous: ds/dt = 1/scale(t).
     if abs(scaleDot) < 1e-12
@@ -431,15 +453,32 @@ function ref = evalScaleRangeTrajectory(baseEval, baseTend, t, simTend, scaleRan
         s = log(scale/scale0)/scaleDot;
     end
 
-    sDot = 1/scale;
-    sDDot = -scaleDot/scale^2;
+    if allowPredict && t > simTend
+        s = s + (t - simTend)/scale1;
+        sDot = 1/scale1;
+        sDDot = 0;
+    else
+        sDot = 1/scale;
+        sDDot = -scaleDot/scale^2;
+    end
 
-    ref = evalProgressTrajectory(baseEval, s, sDot, sDDot, baseTend);
+    ref = evalProgressTrajectory( ...
+        baseEval, s, sDot, sDDot, baseTend, allowPredict);
 end
 
-function ref = evalProgressTrajectory(baseEval, s, sDot, sDDot, baseTend)
+function ref = evalProgressTrajectory( ...
+        baseEval, s, sDot, sDDot, baseTend, allowPredict)
 
-    s = clampScalar(s, 0, baseTend);
+    if nargin < 6
+        allowPredict = false;
+    end
+
+    if allowPredict
+        s = max(s, 0);
+    else
+        s = clampScalar(s, 0, baseTend);
+    end
+
     ref = baseEval(s);
 
     vBase = ref.v;
@@ -590,10 +629,20 @@ function [forceDist, momentDist] = disturbanceAtTime(t, par)
     d = par.disturbance;
     distType = string(getStructField(d, 'type', "none"));
 
+    startTime = double(getStructField(d, 'startTime', 0));
+    endTime = double(getStructField(d, 'endTime', inf));
+    if t < startTime || t > endTime
+        return;
+    end
+
     forceAmp = vector3(getStructField(d, 'forceAmp', 0));
     momentAmp = vector3(getStructField(d, 'momentAmp', 0));
 
     switch distType
+        case "constant"
+            forceDist = forceAmp;
+            momentDist = momentAmp;
+
         case "sin"
             forceFreq = vector3(getStructField(d, 'forceFreq', [0.31; 0.47; 0.61]));
             momentFreq = vector3(getStructField(d, 'momentFreq', [0.43; 0.59; 0.73]));
@@ -841,14 +890,12 @@ function u = controller(x, ref, traj, t, par)
             u = controllerLee(x, ref, t, par);
         case "johnson_beard"
             u = controllerJohnsonBeard(x, ref, t, par);
-        case "sun_linear_mpc"
-            u = controllerSunLinearMPC(x, ref, traj, t, par);
-        case "sun_nmpc_full"
-            u = controllerSunNMPCFull(x, ref, traj, t, par);
+        case "sun_nmpc"
+            u = controllerSunNMPC(x, ref, traj, t, par);
         case "sun_dfbc"
             u = controllerSunDFBC(x, ref, traj, t, par);
-        case "sun_linear_mpc_indi"
-            u = controllerSunLinearMPCINDI(x, ref, traj, t, par);
+        case "sun_nmpc_indi"
+            u = controllerSunNMPCINDI(x, ref, traj, t, par);
         case "sun_dfbc_indi"
             u = controllerSunDFBCINDI(x, ref, traj, t, par);
         case "lu_on_manifold_lqr"
@@ -1476,264 +1523,159 @@ function ff = talFlatnessReference(traj, t, par)
     ff.c = T/par.m;
 end
 
-function u = controllerSunLinearMPC(x, ref, traj, t, par)
-
-    % Version map for the Sun linear-MPC approximation:
-    % - Paper: Eq. (10) is a nonlinear finite-horizon OCP over
-    %   x = [xi; xidot; q; Omega] and rotor thrusts.
-    % - Agilicious C++: implements that OCP with acados, state order
-    %   [p; q; v; omega], rotor thrust inputs, and a generated tilt-yaw
-    %   quaternion residual in the cost.
-    % - This MATLAB function: paper-first reduced adaptation for speed. It
-    %   keeps the paper's tracking objective/reference idea, uses the C++
-    %   residual/weights where they clarify implementation details, and
-    %   replaces the nonlinear rotor-thrust OCP with a local finite-horizon
-    %   LQR over virtual inputs [collective acceleration; body rate]. The
-    %   output is converted to this framework's [T; tau].
-    cmd = sunLinearMPCCommand(x, ref, traj, t, par);
-    u = sunDirectMomentControl(x, cmd, par);
-end
-
-function u = controllerSunNMPCFull(x, ref, traj, t, par)
+function u = controllerSunNMPC(x, ref, traj, t, par)
 
     persistent st
 
-    % Version map for the full Sun NMPC replica:
-    % - Paper target: Eq. (10)-(12), nonlinear horizon, reference
-    %   x_r/u_r, body-rate and thrust constraints, rotor thrust input.
-    % - Agilicious C++ reference: acados-generated solver, state order
-    %   [p; q; v; omega], q_ref as an online parameter, tilt-yaw attitude
-    %   residual, and default Table-I-like weights.
-    % - This MATLAB adaptation: single-shooting fmincon over this benchmark's
-    %   direct force/moment input [T; tau]. Rotor allocation is intentionally
-    %   skipped; the paper's u_r is represented by the equivalent
-    %   [T_ref; tau_ref]. If the solve is unavailable or worse than the fast
-    %   linear-MPC approximation above, the function reports and uses fallback.
-
-    fallback = controllerSunLinearMPC(x, ref, traj, t, par);
-    fallbackRaw = [fallback.T; fallback.tau];
-    fallback.sunFullUsedFallback = true;
-    fallback.sunFullSolved = false;
-    fallback.sunFullFallbackCode = 0;
-    fallback.sunFullExitflag = nan;
-    fallback.sunFullCostRatio = nan;
-    % Codes: 0 optimizer command, 1 missing fmincon, 2 scheduled skip,
-    % 3 invalid solve or bad exitflag, 4 optimizer cost worse than fallback.
-
-    if exist('fmincon', 'file') ~= 2
-        warning('fmincon is unavailable; falling back to sun_linear_mpc.');
-        fallback.sunFullFallbackCode = 1;
-        u = fallback;
-        return;
-    end
-
-    cfg = par.sunFull;
+    cfg = par.sun;
     N = cfg.N;
     h = cfg.dt;
-    refs = sunFullBuildReferences(traj, t, N, h, par);
-    x0 = sunFullStateVector(x);
+    refs = sunNMPCBuildReferences(traj, t, N, h, par);
+    x0 = sunNMPCStateVector(x);
 
-    solveDue = isempty(st) || ~isfield(st, 'nextSolveTime') ...
-        || t <= par.dt/2 || t <= st.t || t >= st.nextSolveTime;
+    solverReset = isempty(st) || t <= par.dt/2 || t <= st.t;
+    if solverReset
+        st = struct;
+        st.pySolver = sunEnsureAcadosPython(par);
+        st.pySolver.reset_warm_start();
+        st.nextSolveTime = -inf;
+        st.lastExitflag = nan;
+    end
+
+    solveDue = ~isfield(st, 'lastRotorThrusts') ...
+        || t + 0.5*par.dt >= st.nextSolveTime;
     if ~solveDue
-        fallback.sunFullFallbackCode = 2;
-        u = fallback;
+        u = sunRotorThrustToControl(st.lastRotorThrusts, refs.R(:,:,1), par);
+        u.sunNMPCCached = true;
+        u.sunNMPCSolved = false;
+        u.sunNMPCStatusCode = 2;
+        u.sunNMPCExitflag = st.lastExitflag;
+        u.sunNMPCSolveTime = 0;
         return;
     end
 
-    z0 = sunFullInputInitialGuess(refs, st, fallbackRaw, par);
-    [lb, ub] = sunFullInputBounds(N, par);
-    opts = optimoptions('fmincon', ...
-        'Algorithm', 'sqp', ...
-        'Display', 'off', ...
-        'MaxIterations', cfg.maxIterations, ...
-        'MaxFunctionEvaluations', cfg.maxFunctionEvaluations, ...
-        'StepTolerance', 1e-6, ...
-        'OptimalityTolerance', 1e-4);
+    pyResult = st.pySolver.solve( ...
+        py.numpy.array(x0'), ...
+        py.numpy.array(refs.p'), ...
+        py.numpy.array(refs.q'), ...
+        py.numpy.array(refs.v'), ...
+        py.numpy.array(refs.Omega'), ...
+        py.numpy.array(refs.u'));
 
-    % Paper Eq. (10), MATLAB-adapted:
-    % min sum ||x_k - x_r,k||_Q + ||u_k - u_r,k||_R over a nonlinear rollout.
-    % The solver is fmincon rather than ACADO/acados. The state order follows
-    % the C++ generated model, [p; q; v; omega], which is only a permutation
-    % of the paper's [xi; xidot; q; Omega]. The input is [T; tau] because this
-    % benchmark outputs force/moment instead of rotor thrusts.
-    objective = @(z) sunFullSingleShootingObjective(z, x0, refs, cfg, par);
-    fallbackZ = repmat(fallbackRaw, N, 1);
-    fallbackCost = objective(fallbackZ);
-    costRatio = nan;
+    status = double(pyResult{'status'});
+    rotorThrusts = double(pyResult{'u0'});
+    rotorThrusts = rotorThrusts(:);
+    solveTime = double(pyResult{'solve_time'});
 
-    try
-        [zOpt, fval, exitflag] = fmincon(objective, z0, [], [], [], [], lb, ub, [], opts);
-    catch
-        zOpt = z0;
-        fval = inf;
-        exitflag = -1;
+    if any(~isfinite(rotorThrusts)) || numel(rotorThrusts) ~= 4
+        error("sun_nmpc acados returned an invalid rotor-thrust vector.");
     end
 
-    if isfinite(fval) && isfinite(fallbackCost) && abs(fallbackCost) > eps
-        costRatio = fval / fallbackCost;
+    if status ~= 0
+        warning("sun_nmpc acados returned status %d at t = %.3f s.", ...
+            status, t);
     end
 
-    badSolve = any(~isfinite(zOpt)) || ~isfinite(fval) || exitflag < 0;
-    worseThanFallback = ~badSolve && fval > fallbackCost;
-    if badSolve || worseThanFallback
-        if worseThanFallback
-            fallback.sunFullFallbackCode = 4;
-        else
-            fallback.sunFullFallbackCode = 3;
-        end
-        fallback.sunFullExitflag = exitflag;
-        fallback.sunFullCostRatio = costRatio;
-        u = fallback;
-        st.nextSolveTime = t + cfg.solvePeriod;
-        st.t = t;
-        exitflag = -1;
-        st.lastExitflag = exitflag;
-        return;
+    u = sunRotorThrustToControl(rotorThrusts, refs.R(:,:,1), par);
+    u.sunNMPCCached = false;
+    u.sunNMPCSolved = true;
+    u.sunNMPCStatusCode = status;
+    u.sunNMPCExitflag = status;
+    u.sunNMPCSolveTime = solveTime;
+
+    if cfg.printSolverTiming
+        fprintf('sun_nmpc t=%.3f solve=%.4fs status=%d\n', ...
+            t, solveTime, status);
     end
 
-    UOpt = reshape(zOpt, 4, N);
-    cmdRaw = UOpt(:,1);
-    u.T = min(max(cmdRaw(1), 0), par.Tmax);
-    u.tau = saturateVector(cmdRaw(2:4), par.tauMax);
-    u.Rd = refs.R(:,:,1);
-    u.sunFullUsedFallback = false;
-    u.sunFullSolved = true;
-    u.sunFullFallbackCode = 0;
-    u.sunFullExitflag = exitflag;
-    u.sunFullCostRatio = costRatio;
-
-    st.U = UOpt;
+    st.lastRotorThrusts = rotorThrusts;
     st.nextSolveTime = t + cfg.solvePeriod;
     st.t = t;
-    st.lastExitflag = exitflag;
+    st.lastExitflag = status;
 end
 
-function z0 = sunFullInputInitialGuess(refs, st, fallbackRaw, par)
+function pySolver = sunEnsureAcadosPython(par)
 
-    N = size(refs.p, 2) - 1;
-    U0 = repmat(fallbackRaw, 1, N);
-    U0 = 0.5*U0 + 0.5*refs.u(:,1:N);
+    persistent pyModule
 
-    hasWarmStart = ~isempty(st) && isfield(st, 'U') && size(st.U, 2) == N;
-    if hasWarmStart
-        U0(:,1:N-1) = st.U(:,2:N);
-        U0(:,N) = st.U(:,N);
-    end
+    if isempty(pyModule)
+        sunConfigurePythonForAcados(par);
 
-    U0(1,:) = min(max(U0(1,:), 0), par.Tmax);
-    U0(2:4,:) = min(max(U0(2:4,:), -par.tauMax), par.tauMax);
-    z0 = U0(:);
-end
+        setenv("ACADOS_SOURCE_DIR", char(par.sun.acadosSourceDir));
+        setenv("ACADOS_INSTALL_DIR", char(par.sun.acadosSourceDir));
 
-function [lb, ub] = sunFullInputBounds(N, par)
-
-    lb = repmat([0; -par.tauMax], N, 1);
-    ub = repmat([par.Tmax; par.tauMax], N, 1);
-end
-
-function Jcost = sunFullSingleShootingObjective(z, x0, refs, cfg, par)
-
-    U = reshape(z, 4, cfg.N);
-    y = x0;
-    Jcost = 0;
-    tauWeight = cfg.RtauNorm;
-
-    for k = 1:cfg.N
-        if any(~isfinite(y)) || any(~isfinite(U(:,k)))
-            Jcost = 1e12;
-            return;
+        toolsPath = char(par.sun.acadosToolsPath);
+        if exist(toolsPath, 'dir') ~= 7
+            mainPath = which('main');
+            if strlength(mainPath) > 0
+                toolsPath = fullfile(fileparts(mainPath), 'tools');
+            end
         end
 
-        Jcost = Jcost + sunFullStateCost(y, refs, k, cfg);
-
-        % Sun Eq. (10): ||u_k - u_r,k||_R. The paper/C++ use rotor thrusts;
-        % here u_r is the force/moment equivalent [T_ref; tau_ref].
-        uErr = U(:,k) - refs.u(:,k);
-        Jcost = Jcost + uErr' * cfg.R * uErr;
-
-        tauNorm = U(2:4,k)./max(par.tauMax, 1e-6);
-        Jcost = Jcost + tauWeight*(tauNorm' * tauNorm);
-
-        y = sunFullStepState(y, U(:,k), cfg.dt, par);
+        pyPath = py.sys.path;
+        pyPath.insert(int32(0), toolsPath);
+        try
+            py.importlib.import_module('casadi');
+            py.importlib.import_module('acados_template');
+            pyModule = py.importlib.import_module('sun_acados_nmpc');
+        catch err
+            pe = pyenv;
+            error(['sun_nmpc cannot import its Python/acados dependencies.\n' ...
+                   'MATLAB is currently using Python:\n  %s\n' ...
+                   'Run setup_sun_acados_python once, then restart MATLAB ' ...
+                   'if pyenv Status is Loaded, and run main again.\n' ...
+                   'Original import error:\n%s'], ...
+                  char(pe.Executable), err.message);
+        end
     end
 
-    if any(~isfinite(y))
-        Jcost = 1e12;
+    pySolver = pyModule;
+end
+
+function sunConfigurePythonForAcados(par)
+
+    if ~isfield(par.sun, 'pythonExecutable')
         return;
     end
 
-    Jcost = Jcost + sunFullStateCost(y, refs, cfg.N+1, cfg);
+    desiredPython = char(par.sun.pythonExecutable);
+    if exist(desiredPython, 'file') ~= 2
+        return;
+    end
+
+    pe = pyenv;
+    if string(pe.Status) == "NotLoaded"
+        pyenv('Version', desiredPython, 'ExecutionMode', 'InProcess');
+        return;
+    end
+
+    currentPython = char(pe.Executable);
+    if strcmp(currentPython, desiredPython)
+        return;
+    end
+
+    try
+        py.importlib.import_module('casadi');
+        py.importlib.import_module('acados_template');
+    catch err
+        error(['MATLAB has already loaded a Python environment that cannot ' ...
+               'import Sun NMPC dependencies.\n' ...
+               'Current Python:\n  %s\n' ...
+               'Prepared Python:\n  %s\n' ...
+               'Restart MATLAB, then before running main execute:\n' ...
+               '  pyenv(''Version'', ''%s'', ''ExecutionMode'', ''InProcess'')\n' ...
+               'Or run setup_sun_acados_python to install dependencies into ' ...
+               'the current Python.\nOriginal import error:\n%s'], ...
+              currentPython, desiredPython, desiredPython, err.message);
+    end
 end
 
-function Jk = sunFullStateCost(y, refs, k, cfg)
+function refs = sunNMPCBuildReferences(traj, t, N, h, par)
 
-    ep = y(1:3) - refs.p(:,k);
-    eR = sunAgiliciousAttitudeResidual(y(4:7), refs.q(:,k));
-    ev = y(8:10) - refs.v(:,k);
-    eOmega = y(11:13) - refs.Omega(:,k);
-
-    Jk = ep' * cfg.Qpos * ep ...
-       + eR' * cfg.Qatt * eR ...
-       + ev' * cfg.Qvel * ev ...
-       + eOmega' * cfg.Qomega * eOmega;
-end
-
-function eAtt = sunAgiliciousAttitudeResidual(q, qRef)
-
-    % Agilicious generated acados cost_y_fun: q_ref is an online parameter,
-    % yref attitude is zero, and the attitude residual is the tilt-yaw split
-    % vector from q_e = q^{-1} * q_ref with the generated 1e-3 regularization.
-    q = normalizeQuatWXYZ(q);
-    qRef = normalizeQuatWXYZ(qRef);
-    qe = quatMultiplyWXYZ(quatConjugateWXYZ(q), qRef);
-    qe = normalizeQuatWXYZ(qe);
-
-    den = sqrt(qe(1)^2 + qe(4)^2 + 1e-3);
-    eAtt = [qe(1)*qe(2) - qe(3)*qe(4);
-            qe(1)*qe(3) + qe(2)*qe(4);
-            qe(4)]/den;
-end
-
-function yNext = sunFullStepState(y, u, h, par)
-
-    k1 = sunFullStateDerivative(y, u, par);
-    k2 = sunFullStateDerivative(y + 0.5*h*k1, u, par);
-    k3 = sunFullStateDerivative(y + 0.5*h*k2, u, par);
-    k4 = sunFullStateDerivative(y + h*k3, u, par);
-
-    yNext = y + h/6*(k1 + 2*k2 + 2*k3 + k4);
-    yNext(4:7) = normalizeQuatWXYZ(yNext(4:7));
-end
-
-function yDot = sunFullStateDerivative(y, u, par)
-
-    q = normalizeQuatWXYZ(y(4:7));
-    Omega = y(11:13);
-    R = quatToRotmWXYZ(q);
-    T = u(1);
-    tau = u(2:4);
-
-    % Foehn Eq. (15) and Sun Eq. (1)-(3), converted to this NED model:
-    % p_dot = v, v_dot = g*e3 - T/m*R*e3, q_dot = 1/2 q*[0;Omega],
-    % J*Omega_dot = tau - Omega x J*Omega.
-    qDot = 0.5*quatMultiplyWXYZ(q, [0; Omega]);
-    vDot = par.g*par.e3 - T/par.m*R*par.e3;
-    OmegaDot = par.J \ (tau - cross(Omega, par.J*Omega));
-
-    yDot = [y(8:10); qDot; vDot; OmegaDot];
-end
-
-function refs = sunFullBuildReferences(traj, t, N, h, par)
-
-    % Reference handling, paper vs C++ vs this MATLAB adaptation:
-    % - Paper Eq. (10): supplies x_r = [xi_r; xidot_r; q_r; Omega_r] and
-    %   u_r as rotor thrusts from the planner/flatness map.
-    % - Agilicious C++: stores p/v/omega/u in yref, while q_ref is passed as
-    %   an online parameter to the generated cost.
-    % - This MATLAB code: stores q_ref directly in refs.q and evaluates the
-    %   same cost explicitly. Since allocation is skipped, u_r is represented
-    %   by the force/moment equivalent [T_ref; tau_ref].
+    % Paper Eq. (10): supplies x_r = [xi_r; xidot_r; q_r; Omega_r] and u_r
+    % as four rotor thrusts. The prediction reference may run past par.Tend
+    % by N*h, but the simulation and logged tracking error still stop exactly
+    % at par.Tend.
     refs.p = zeros(3, N + 1);
     refs.v = zeros(3, N + 1);
     refs.R = zeros(3, 3, N + 1);
@@ -1745,8 +1687,12 @@ function refs = sunFullBuildReferences(traj, t, N, h, par)
     refs.u = zeros(4, N + 1);
 
     for k = 1:N+1
-        tk = min(t + (k-1)*h, par.Tend);
-        ref = traj.eval(tk);
+        tk = t + (k-1)*h;
+        if isfield(traj, 'evalPredict')
+            ref = traj.evalPredict(tk);
+        else
+            ref = traj.eval(min(tk, par.Tend));
+        end
         [Rk, Tk] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
 
         refs.p(:,k) = ref.p;
@@ -1771,12 +1717,12 @@ function refs = sunFullBuildReferences(traj, t, N, h, par)
     for k = 1:N+1
         refs.tau(:,k) = par.J*refs.alpha(:,k) ...
             + cross(refs.Omega(:,k), par.J*refs.Omega(:,k));
-        refs.tau(:,k) = saturateVector(refs.tau(:,k), par.tauMax);
-        refs.u(:,k) = [refs.T(k); refs.tau(:,k)];
+        refs.u(:,k) = sunAllocateRotorThrusts( ...
+            refs.T(k), refs.tau(:,k), par);
     end
 end
 
-function xVec = sunFullStateVector(x)
+function xVec = sunNMPCStateVector(x)
 
     xVec = [x.p;
             rotmToQuatWXYZ(x.R);
@@ -1784,18 +1730,72 @@ function xVec = sunFullStateVector(x)
             x.Omega];
 end
 
+function G = sunAllocationMatrix(par)
+
+    tBM = par.sun.tBM;
+    kappa = par.sun.kappa;
+    G = [ones(1,4);
+         tBM(2,:);
+        -tBM(1,:);
+         kappa*[-1, -1, 1, 1]];
+end
+
+function uRotor = sunAllocateRotorThrusts(T, tau, par)
+
+    mu = [T; tau(:)];
+    uRotor = sunBoundedAllocation(mu, par);
+end
+
+function uRotor = sunBoundedAllocation(mu, par)
+
+    sunEnsureWLSAllocPath(par);
+
+    G = sunAllocationMatrix(par);
+    Wv = diag(sqrt(diag(par.sun.W)));
+    lb = par.sun.uMin(:);
+    ub = par.sun.uMax(:);
+    u0 = min(max(G\mu(:), lb), ub);
+
+    Wu = zeros(4);
+    ud = zeros(4,1);
+    gamma = 1;
+    W0 = zeros(4,1);
+    uRotor = wls_alloc(G, mu(:), lb, ub, Wv, Wu, ud, gamma, u0, W0, 50);
+    uRotor = min(max(uRotor(:), lb), ub);
+end
+
+function sunEnsureWLSAllocPath(par)
+
+    wlsPath = char(par.sun.wlsAllocPath);
+    if exist('wls_alloc', 'file') == 2
+        return;
+    end
+
+    if exist(wlsPath, 'dir') ~= 7
+        error("QCAT wls_alloc path does not exist: %s", wlsPath);
+    end
+
+    addpath(wlsPath);
+    if exist('wls_alloc', 'file') ~= 2
+        error("wls_alloc.m was not found after adding path: %s", wlsPath);
+    end
+end
+
+function u = sunRotorThrustToControl(uRotor, Rd, par)
+
+    uRotor = min(max(uRotor(:), par.sun.uMin), par.sun.uMax);
+    mu = sunAllocationMatrix(par)*uRotor;
+
+    u.T = min(max(mu(1), 0), par.Tmax);
+    u.tau = saturateVector(mu(2:4), par.tauMax);
+    u.Rd = Rd;
+    u.rotorThrusts = uRotor;
+end
+
 function u = controllerSunDFBC(x, ref, traj, t, par)
 
     cmd = sunDFBCCommand(x, ref, traj, t, par);
-    u = sunDirectMomentControl(x, cmd, par);
-end
-
-function u = controllerSunLinearMPCINDI(x, ref, traj, t, par)
-
-    persistent st
-
-    cmd = sunLinearMPCCommand(x, ref, traj, t, par);
-    [u, st] = sunINDIMomentControl(x, cmd, t, par, st);
+    u = sunRotorThrustToControl(cmd.rotorThrusts, cmd.Rd, par);
 end
 
 function u = controllerSunDFBCINDI(x, ref, traj, t, par)
@@ -1803,54 +1803,22 @@ function u = controllerSunDFBCINDI(x, ref, traj, t, par)
     persistent st
 
     cmd = sunDFBCCommand(x, ref, traj, t, par);
-    [u, st] = sunINDIMomentControl(x, cmd, t, par, st);
+    [u, st] = sunINDIRotorControl(x, cmd, t, par, st);
 end
 
-function cmd = sunLinearMPCCommand(x, ref, traj, t, par)
+function u = controllerSunNMPCINDI(x, ref, traj, t, par)
 
-    % Sun linear-MPC approximation details:
-    % Paper Eq. (10) would optimize the nonlinear model over
-    % x = [xi; xidot; q; Omega] and rotor thrusts. That exact problem is the
-    % job of controllerSunNMPCFull below. This approximation keeps the paper's
-    % MPC structure but uses a local model-predictive LQR so it can run inside
-    % the simple MATLAB simulation loop.
-    %
-    % Differences from the paper:
-    % - input is virtual [a_T; Omega_cmd], not four rotor thrusts;
-    % - dynamics are the local error model from this benchmark, not the full
-    %   nonlinear rotor model;
-    % - output is converted to [T; tau].
-    %
-    % C++ details intentionally borrowed:
-    % - Table-I/C++ state weights in par.sun;
-    % - generated tilt-yaw attitude residual, because it is the actual
-    %   Agilicious cost implementation behind the paper-level description.
-    [Rd, aTd, OmegaD] = referenceInputOnManifold(ref, traj, t, par, par.sun.dt);
+    persistent st
 
-    % Paper Eq. (11)-(12) attitude error, using the C++ generated residual:
-    % q_e = q^{-1}*q_ref. The local linear model below expects angle-scale
-    % Log(Rd'*R), so the C++ residual is negated and doubled to match the
-    % first-order convention used by this benchmark's error dynamics.
-    eAtt = -2*sunAgiliciousAttitudeResidual( ...
-        rotmToQuatWXYZ(x.R), rotmToQuatWXYZ(Rd));
-    e = [x.p - ref.p;
-         x.v - ref.v;
-         eAtt];
+    uMpc = controllerSunNMPC(x, ref, traj, t, par);
+    cmd = sunCommandFromRotorThrusts(uMpc.rotorThrusts, uMpc.Rd, x, par);
+    [u, st] = sunINDIRotorControl(x, cmd, t, par, st);
 
-    [Ad, Bd] = linearizedQuadrotorErrorModel(Rd, aTd, par, par.sun.dt);
-    K = finiteHorizonLQR(Ad, Bd, par.sun.Q, par.sun.Rvirtual, ...
-        par.sun.P, par.sun.N);
-
-    du = -K*e;
-    aTCmd = aTd + du(1);
-    OmegaCmd = OmegaD + du(2:4);
-
-    aTCmd = min(max(aTCmd, 0), par.Tmax/par.m);
-    OmegaCmd = saturateVector(OmegaCmd, par.sun.omegaMax);
-
-    cmd.T = par.m*aTCmd;
-    cmd.alpha = par.J \ (par.sun.KOmega*(OmegaCmd - x.Omega));
-    cmd.Rd = Rd;
+    u.sunNMPCCached = uMpc.sunNMPCCached;
+    u.sunNMPCSolved = uMpc.sunNMPCSolved;
+    u.sunNMPCStatusCode = uMpc.sunNMPCStatusCode;
+    u.sunNMPCExitflag = uMpc.sunNMPCExitflag;
+    u.sunNMPCSolveTime = uMpc.sunNMPCSolveTime;
 end
 
 function cmd = sunDFBCCommand(x, ref, traj, t, par)
@@ -1858,7 +1826,7 @@ function cmd = sunDFBCCommand(x, ref, traj, t, par)
     % Sun et al. Eq. (13): desired acceleration from PD position feedback.
     xiErr = ref.p - x.p;
     vErr = ref.v - x.v;
-    accD = par.sun.Kp*xiErr + par.sun.Kv*vErr + ref.a;
+    accD = par.sun.Kxi*xiErr + par.sun.Kv*vErr + ref.a;
 
     % Sun et al. Eq. (14)-(17), converted from the paper's ENU convention
     % where z_B is the thrust direction to this NED model where R*e3 is
@@ -1894,60 +1862,68 @@ function cmd = sunDFBCCommand(x, ref, traj, t, par)
         qYaw = [0; 0; qe(4)]/den;
     end
 
-    % Sun et al. Eq. (28): tilt-prioritized attitude control. The paper's
-    % K_Omega is an angular-acceleration gain, so convert the framework's
-    % moment-shaped gain KOmega by J^{-1}.
-    Kq = par.J \ par.sun.KR;
-    KOmegaAlpha = par.J \ par.sun.KOmega;
+    % Sun et al. Eq. (28): tilt-prioritized attitude control.
     yawSign = 1;
     if qe(1) < 0
         yawSign = -1;
     end
 
-    alphaD = Kq*qRed + Kq(3,3)*yawSign*qYaw ...
-           + KOmegaAlpha*(OmegaR - x.Omega) + alphaR;
+    alphaD = par.sun.KqRed*qRed + par.sun.kqYaw*yawSign*qYaw ...
+           + par.sun.KOmega*(OmegaR - x.Omega) + alphaR;
 
+    tauDesired = par.J*alphaD + cross(x.Omega, par.J*x.Omega);
+    rotorThrusts = sunAllocateRotorThrusts(T, tauDesired, par);
+
+    cmd.rotorThrusts = rotorThrusts;
     cmd.T = T;
     cmd.alpha = alphaD;
     cmd.Rd = Rd;
 end
 
-function u = sunDirectMomentControl(x, cmd, par)
+function cmd = sunCommandFromRotorThrusts(rotorThrusts, Rd, x, par)
 
-    % Rigid-body rotational dynamics in Sun et al. Eq. (3), simplified
-    % after skipping rotor allocation: tau = J*alpha_d + Omega x J*Omega.
-    tau = par.J*cmd.alpha + cross(x.Omega, par.J*x.Omega);
-
-    u.T = min(max(cmd.T, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = cmd.Rd;
+    rotorThrusts = min(max(rotorThrusts(:), par.sun.uMin), par.sun.uMax);
+    mu = sunAllocationMatrix(par)*rotorThrusts;
+    cmd.rotorThrusts = rotorThrusts;
+    cmd.T = mu(1);
+    cmd.alpha = par.J \ (mu(2:4) - cross(x.Omega, par.J*x.Omega));
+    cmd.Rd = Rd;
 end
 
-function [u, st] = sunINDIMomentControl(x, cmd, t, par, st)
+function [u, st] = sunINDIRotorControl(x, cmd, t, par, st)
 
-    % Sun et al. Eq. (32)-(35): tau_indi = tau_f +
-    % J*(alpha_cmd - omega_dot_f). Since control allocation is skipped here,
-    % tau_f is represented by the previous saturated moment. Agilicious'
-    % IndiController additionally replaces yaw with an NDI value; that is a
-    % C++ implementation patch, so it is only noted here, not used.
+    % Sun et al. Eq. (32)-(35), with the Agilicious implementation detail
+    % that yaw torque uses the NDI value to avoid yaw oscillation. The MATLAB
+    % plant has no motor-speed sensor, so the previous commanded rotor
+    % thrusts stand in for filtered rotor-thrust feedback.
 
     if isempty(st) || t <= par.dt/2 || t <= st.t
         omegaDotF = zeros(3,1);
-        tauF = zeros(3,1);
+        thrustsF = cmd.rotorThrusts;
     else
         h = max(t - st.t, par.dt);
         omegaDotF = (x.Omega - st.Omega)/h;
-        tauF = st.tau;
+        thrustsF = st.rotorThrusts;
     end
 
-    tau = tauF + par.J*(cmd.alpha - omegaDotF);
+    muF = sunAllocationMatrix(par)*thrustsF;
+    tauF = muF(2:4);
 
-    u.T = min(max(cmd.T, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = cmd.Rd;
+    mu = zeros(4,1);
+    mu(1) = sum(cmd.rotorThrusts);
+    mu(2:4) = tauF + par.J*(cmd.alpha - omegaDotF);
+
+    muNdi = zeros(4,1);
+    muNdi(1) = mu(1);
+    muNdi(2:4) = par.J*cmd.alpha + cross(x.Omega, par.J*x.Omega);
+    mu(4) = muNdi(4);
+
+    rotorThrusts = sunBoundedAllocation(mu, par);
+
+    u = sunRotorThrustToControl(rotorThrusts, cmd.Rd, par);
 
     st.Omega = x.Omega;
-    st.tau = u.tau;
+    st.rotorThrusts = rotorThrusts;
     st.t = t;
 end
 
@@ -2189,13 +2165,13 @@ function xNext = stepModelODE45(x, u, par, t0)
     xNext.Omega = y(16:18);
 end
 
-function yDot = quadrotorOde(~, y, u, par)
+function yDot = quadrotorOde(t, y, u, par)
 
     v = y(4:6);
     R = reshape(y(7:15), 3, 3);
     Omega = y(16:18);
 
-    [a, OmegaDot] = rigidBodyRates(R, Omega, u, par);
+    [a, OmegaDot] = rigidBodyRates(R, Omega, u, par, t);
 
     yDot = [v;
             a;
@@ -2357,9 +2333,9 @@ function plotDerivativeTracking(time, log, par, traj)
 
     figure('Name','angular velocity and angular acceleration tracking');
 
-    labels = {'\Omega_x (rad/s)', '\Omega_y (rad/s)', '\Omega_z (rad/s)', ...
-              '\dot{\Omega}_x (rad/s^2)', '\dot{\Omega}_y (rad/s^2)', ...
-              '\dot{\Omega}_z (rad/s^2)'};
+    labels = {'Omega x (rad/s)', 'Omega y (rad/s)', 'Omega z (rad/s)', ...
+              'Omega dot x (rad/s^2)', 'Omega dot y (rad/s^2)', ...
+              'Omega dot z (rad/s^2)'};
     actual = [log.Omega; alphaActual];
     desired = [omegaRef; alphaRef];
 
