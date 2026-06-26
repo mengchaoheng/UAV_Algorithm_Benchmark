@@ -15,8 +15,8 @@ clear; clc; close all;
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-% trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
-trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_sine",  "fast_circle"];
+trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
+% trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_sine",  "fast_circle"];
 
 
 % Available controllers for this comparison:
@@ -25,7 +25,7 @@ trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_
 % "geometric_indi", "tal_karaman"
 % controllerNames = ["geometric", "faessler", "lee", "johnson_beard", "sun_dfbc", "sun_dfbc_indi","geometric_indi", "tal_karaman"];
 % controllerNames = ["lu_on_manifold_lqr", "sun_linear_mpc", "sun_nmpc_full", "sun_linear_mpc_indi"];
-controllerNames = ["johnson_beard", "sun_linear_mpc", "geometric_indi"];
+controllerNames = ["sun_dfbc", "sun_linear_mpc", "geometric_indi"];
 
 %% ========================================================================
 %% 1. Disturbance Settings
