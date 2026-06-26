@@ -46,7 +46,7 @@ par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the si
 par.trajName = "helix_flip";
 
 % Simple controller gains
-par.controllerName = "geometric_indi";  % "geometric", "on_manifold_mpc", or "geometric_indi"
+par.controllerName = "on_manifold_mpc";  % "geometric", "on_manifold_mpc", or "geometric_indi"
 par.Kp = diag([20, 20, 25]);
 par.Kv = diag([9, 9, 10]);
 par.KR = 35*eye(3);
