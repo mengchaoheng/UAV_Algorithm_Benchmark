@@ -28,19 +28,25 @@ par.m = 1.0;
 par.J = diag([0.07, 0.07, 0.12]);
 
 par.dt = 0.01;          % 100 Hz
-par.Tend = 12.0;
-par.trajTimeScale = 1.0;    % >1 slows the reference trajectory
+par.Tend = 15.0;
 par.integratorName = "ode45";  % "ode45" or "lie_rk4"
+
+% Reference time scaling.
+% scale > 1 slows the reference; scale < 1 speeds it up and may saturate control.
+par.progress.mode = "scale_range";      % "scale_fixed" or "scale_range"
+par.progress.scale = 2.5;               % scale_fixed: constant time scale
+par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the simulation
 
 % Available choices:
 %   "figure8_horizontal"
+%   "figure8_vertical"
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "flip_loop_sine";
+par.trajName = "helix_flip";
 
 % Simple controller gains
-par.controllerName = "on_manifold_mpc";  % "geometric" or "on_manifold_mpc"
+par.controllerName = "geometric_indi";  % "geometric", "on_manifold_mpc", or "geometric_indi"
 par.Kp = diag([20, 20, 25]);
 par.Kv = diag([9, 9, 10]);
 par.KR = 35*eye(3);
@@ -56,6 +62,12 @@ par.mpc.R = diag([1.0, 0.55, 0.55, 0.75]);
 par.mpc.P = par.mpc.Q;
 par.mpc.omegaMax = deg2rad(800);
 
+% Geometric INDI gains.
+par.indi.Kp = par.Kp;
+par.indi.Kv = par.Kv;
+par.indi.Ktheta = 55*eye(3);
+par.indi.Komega = 14*eye(3);
+
 % Actuator limits
 par.Tmax = 4*9.81;
 par.tauMax = [8; 8; 8];
@@ -64,8 +76,8 @@ par.tauMax = [8; 8; 8];
 par.startOnReference = true;
 
 % 3D attitude sampling visualization
-par.poseEvery = 0.20;       % seconds
-par.bodyAxisScale = 0.25;   % meters
+par.poseEvery = 0.10;       % seconds
+par.bodyAxisScale = 0.5;   % meters
 par.poseSource = "actual";  % "actual" or "desired"
 
 % Post-simulation 3D animation
@@ -162,6 +174,11 @@ function traj = makeTrajectory(par)
             traj.Tend = 12.0;
             traj.eval = @(t) evalFigure8Horizontal(t);
 
+        case "figure8_vertical"
+            traj.name = "figure8_vertical";
+            traj.Tend = par.Tend;
+            traj.eval = @(t) evalFigure8Vertical(t);
+
         case "helix_flip"
             traj.name = "helix_flip";
             traj.Tend = par.Tend;
@@ -181,33 +198,82 @@ function traj = makeTrajectory(par)
             error("Unknown trajectory name.");
     end
 
-    traj = scaleTrajectoryTime(traj, par.trajTimeScale);
+    traj = applyTrajectoryProgress(traj, par);
 end
 
-function traj = scaleTrajectoryTime(traj, scale)
-
-    if scale <= 0
-        error("Trajectory time scale must be positive.");
-    end
-
-    if abs(scale - 1) < 1e-12
-        return;
-    end
+function traj = applyTrajectoryProgress(traj, par)
 
     baseEval = traj.eval;
     baseTend = traj.Tend;
 
-    traj.Tend = scale*baseTend;
-    traj.name = traj.name + "_timeScale_" + string(scale);
-    traj.eval = @(t) evalScaledTrajectory(baseEval, t, scale, baseTend);
+    switch par.progress.mode
+        case "scale_fixed"
+            scale = par.progress.scale;
+
+            if scale <= 0
+                error("Trajectory time scale must be positive.");
+            end
+
+            traj.Tend = scale*baseTend;
+            traj.eval = @(t) evalProgressTrajectory(baseEval, t/scale, 1/scale, 0, baseTend);
+
+            if abs(scale - 1) >= 1e-12
+                traj.name = traj.name + "_timeScale_" + string(scale);
+            end
+
+        case "scale_range"
+            scaleRange = par.progress.scaleRange;
+
+            if any(scaleRange <= 0)
+                error("Trajectory time scale must be positive.");
+            end
+
+            traj.Tend = par.Tend;
+            traj.name = traj.name + "_scaleRange_" + string(scaleRange(1)) ...
+                      + "_" + string(scaleRange(2));
+            traj.eval = @(t) evalScaleRangeTrajectory(baseEval, baseTend, t, traj.Tend, scaleRange);
+
+        otherwise
+            error("Unknown progress mode.");
+    end
 end
 
-function ref = evalScaledTrajectory(baseEval, t, scale, baseTend)
+function ref = evalScaleRangeTrajectory(baseEval, baseTend, t, simTend, scaleRange)
 
-    tBase = min(max(t/scale, 0), baseTend);
-    ref = baseEval(tBase);
-    ref.v = ref.v/scale;
-    ref.a = ref.a/(scale^2);
+    alpha = clampScalar(t/simTend, 0, 1);
+    scale0 = scaleRange(1);
+    scale1 = scaleRange(2);
+
+    tClip = alpha*simTend;
+    scaleDot = (scale1 - scale0)/simTend;
+    scale = scale0 + scaleDot*tClip;
+
+    % The scale is instantaneous: ds/dt = 1/scale(t).
+    if abs(scaleDot) < 1e-12
+        s = tClip/scale0;
+    else
+        s = log(scale/scale0)/scaleDot;
+    end
+
+    sDot = 1/scale;
+    sDDot = -scaleDot/scale^2;
+
+    ref = evalProgressTrajectory(baseEval, s, sDot, sDDot, baseTend);
+end
+
+function ref = evalProgressTrajectory(baseEval, s, sDot, sDDot, baseTend)
+
+    s = clampScalar(s, 0, baseTend);
+    ref = baseEval(s);
+
+    vBase = ref.v;
+    aBase = ref.a;
+    ref.v = vBase*sDot;
+    ref.a = aBase*sDot^2 + vBase*sDDot;
+end
+
+function y = clampScalar(x, xmin, xmax)
+    y = min(max(x, xmin), xmax);
 end
 
 %% ========================================================================
@@ -233,6 +299,52 @@ function ref = evalFigure8Horizontal(t)
              0];
 
     ref.psi = atan2(ref.v(2), ref.v(1));
+end
+
+%% ========================================================================
+%% Analytic vertical figure-eight
+function ref = evalFigure8Vertical(t)
+
+    Ay = 1.15;
+    Az = 1.00;
+    hLow = 1.35;
+    hCenter = hLow + Az;
+    Tfig = 5.50;
+    tHover = 1.0;
+    tRamp = 1.50;
+    Om = 2*pi/Tfig;
+    theta0 = -pi/4;
+
+    if t <= tHover
+        ref.p = [0; -Ay/sqrt(2); -hLow];
+        ref.v = [0; 0; 0];
+        ref.a = [0; 0; 0];
+        ref.psi = 0;
+        return;
+    end
+
+    tau = t - tHover;
+    [q, qDot, qDDot] = rampedTime(tau, tRamp);
+
+    theta = theta0 + Om*q;
+    thetaDot = Om*qDot;
+    thetaDDot = Om*qDDot;
+
+    h = hCenter + Az*sin(2*theta);
+
+    ref.p = [0;
+             Ay*sin(theta);
+            -h];
+
+    ref.v = [0;
+             Ay*cos(theta)*thetaDot;
+            -2*Az*cos(2*theta)*thetaDot];
+
+    ref.a = [0;
+             Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
+             4*Az*sin(2*theta)*thetaDot^2 - 2*Az*cos(2*theta)*thetaDDot];
+
+    ref.psi = 0;
 end
 
 %% ========================================================================
@@ -381,6 +493,8 @@ function u = controller(x, ref, traj, t, par)
             u = controllerPDGeometric(x, ref, par);
         case "on_manifold_mpc"
             u = controllerOnManifoldMPC(x, ref, traj, t, par);
+        case "geometric_indi"
+            u = controllerGeometricINDI(x, ref, t, par);
         otherwise
             error("Unknown controllerName.");
     end
@@ -429,6 +543,63 @@ function u = controllerOnManifoldMPC(x, ref, traj, t, par)
     u.T = par.m*aTCmd;
     u.tau = saturateVector(tau, par.tauMax);
     u.Rd = Rd;
+end
+
+function u = controllerGeometricINDI(x, ref, t, par)
+
+    persistent st
+
+    ep = ref.p - x.p;
+    ev = ref.v - x.v;
+    aCmd = par.indi.Kp*ep + par.indi.Kv*ev + ref.a;
+
+    if isempty(st) || t <= par.dt/2
+        [Rd, T] = desiredAttitudeFromAccel(aCmd, ref.psi, par, x.R);
+        rErr = LogSO3(x.R' * Rd);
+
+        u.T = min(max(T, 0), par.Tmax);
+        u.tau = saturateVector(par.KR*rErr - par.KOmega*x.Omega, par.tauMax);
+        u.Rd = Rd;
+
+        st = updateINDIState(x, u, Rd, zeros(3,1), t);
+        return;
+    end
+
+    h = max(t - st.t, par.dt);
+    vDot0 = (x.v - st.v)/h;
+    OmegaDot0 = (x.Omega - st.Omega)/h;
+
+    T_b_z0 = st.T * st.R*par.e3;
+    T_b_z = T_b_z0 - par.m*(aCmd - vDot0);
+    [Rd, T] = desiredAttitudeFromThrustVector(T_b_z, ref.psi, par);
+
+    OmegaR = LogSO3(st.Rd' * Rd)/h;
+    OmegaDotR = (OmegaR - st.OmegaR)/h;
+
+    rErr = LogSO3(x.R' * Rd);
+    OmegaDotCmd = par.indi.Ktheta*rErr ...
+                + par.indi.Komega*(OmegaR - x.Omega) ...
+                + OmegaDotR;
+
+    tau = st.tau + par.J*(OmegaDotCmd - OmegaDot0);
+
+    u.T = min(max(T, 0), par.Tmax);
+    u.tau = saturateVector(tau, par.tauMax);
+    u.Rd = Rd;
+
+    st = updateINDIState(x, u, Rd, OmegaR, t);
+end
+
+function st = updateINDIState(x, u, Rd, OmegaR, t)
+
+    st.v = x.v;
+    st.R = x.R;
+    st.Omega = x.Omega;
+    st.T = u.T;
+    st.tau = u.tau;
+    st.Rd = Rd;
+    st.OmegaR = OmegaR;
+    st.t = t;
 end
 
 function [Rd, aT, OmegaD] = referenceInputOnManifold(ref, traj, t, par)
@@ -486,8 +657,20 @@ function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par, RCurrent)
     % T = dot(T_b_z, RCurrent*par.e3); % option 1: current-attitude projection
     T = norm(T_b_z);                 % option 2: desired-force magnitude
 
+    Rd = attitudeFromThrustDirection(T_b_z/norm(T_b_z), psi);
+end
 
-    b3d = T_b_z/norm(T_b_z);
+function [Rd, T] = desiredAttitudeFromThrustVector(T_b_z, psi, par)
+
+    if norm(T_b_z) < 1e-9
+        T_b_z = par.m*par.g*par.e3;
+    end
+
+    T = norm(T_b_z);
+    Rd = attitudeFromThrustDirection(T_b_z/T, psi);
+end
+
+function Rd = attitudeFromThrustDirection(b3d, psi)
 
     headingAxis = [cos(psi); sin(psi); 0];
 
