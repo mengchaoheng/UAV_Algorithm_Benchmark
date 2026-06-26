@@ -18,7 +18,16 @@
 %   ref.a   acceleration
 %   ref.psi yaw
 
-clear; clc; close all;
+if exist('UAV_BENCHMARK_BATCH', 'var') && UAV_BENCHMARK_BATCH
+    if exist('UAV_BENCHMARK_PAR_OVERRIDE', 'var')
+        parOverride__ = UAV_BENCHMARK_PAR_OVERRIDE;
+    else
+        parOverride__ = struct();
+    end
+else
+    clear; clc; close all;
+    parOverride__ = struct();
+end
 
 %% ========================================================================
 %% 0. Parameters
@@ -35,7 +44,7 @@ par.integratorName = "ode45";  % "ode45" or "lie_rk4"
 % scale > 1 slows the reference; scale < 1 speeds it up and may saturate control.
 par.progress.mode = "scale_range";      % "scale_fixed" or "scale_range"
 par.progress.scale = 2.5;               % scale_fixed: constant time scale
-par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the simulation
+par.progress.scaleRange = [2, 1];   % scale_range: start/end scale over the simulation
 
 % Available choices:
 %   "figure8_horizontal"
@@ -181,6 +190,21 @@ par.tal.flatnessRcondMin = 1e-6;
 par.Tmax = 4*9.81;
 par.tauMax = [8; 8; 8];
 
+% Additive plant disturbances. The force disturbance is expressed in inertial
+% NED coordinates [N]; the moment disturbance is expressed in the body frame
+% [N*m], matching the plant translational and rotational equations below.
+% The default is disabled, so normal single-run behavior is unchanged.
+par.disturbance.enabled = false;
+par.disturbance.type = "none";       % "none", "sin", or "random"
+par.disturbance.forceAmp = 0;        % scalar or 3x1 per-axis amplitude [N]
+par.disturbance.momentAmp = 0;       % scalar or 3x1 per-axis amplitude [N*m]
+par.disturbance.forceFreq = [0.31; 0.47; 0.61];   % sinusoid frequencies [Hz]
+par.disturbance.momentFreq = [0.43; 0.59; 0.73];  % sinusoid frequencies [Hz]
+par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
+par.disturbance.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
+par.disturbance.seed = 1;
+par.disturbance.randomHold = 0.05;   % random disturbance sample hold [s]
+
 % Initial condition
 par.startOnReference = true;
 
@@ -190,9 +214,14 @@ par.bodyAxisScale = 0.5;   % meters
 par.poseSource = "actual";  % "actual" or "desired"
 
 % Post-simulation 3D animation
+par.enablePlots = true;
 par.enableAnimation = true;
 par.animationSpeed = 1;       % 1.0 = real time
 par.animationFrameDt = 0.02;    % seconds
+
+if ~isempty(fieldnames(parOverride__))
+    par = mergeStructRecursive(par, parOverride__);
+end
 
 %% ========================================================================
 %% 1. Build trajectory
@@ -236,6 +265,8 @@ log.eulerD = zeros(3,N);
 
 log.T = zeros(1,N);
 log.tau = zeros(3,N);
+log.forceDist = zeros(3,N);
+log.momentDist = zeros(3,N);
 log.sunFullUsedFallback = false(1,N);
 log.sunFullSolved = false(1,N);
 log.sunFullFallbackCode = zeros(1,N);
@@ -265,6 +296,7 @@ for k = 1:N
 
     log.T(k) = u.T;
     log.tau(:,k) = u.tau;
+    [log.forceDist(:,k), log.momentDist(:,k)] = disturbanceAtTime(t, par);
 
     if isfield(u, 'sunFullUsedFallback')
         log.sunFullUsedFallback(k) = u.sunFullUsedFallback;
@@ -274,7 +306,7 @@ for k = 1:N
         log.sunFullCostRatio(k) = u.sunFullCostRatio;
     end
 
-    x = stepModel(x, u, par);
+    x = stepModel(x, u, par, t);
 end
 
 if par.controllerName == "sun_nmpc_full"
@@ -290,7 +322,9 @@ end
 
 %% ========================================================================
 %% 5. Plot
-plotResults(time, log, par, traj);
+if par.enablePlots
+    plotResults(time, log, par, traj);
+end
 
 if par.enableAnimation
     animateTrajectory3D(time, log, par, traj);
@@ -409,6 +443,93 @@ function y = clampScalar(x, xmin, xmax)
     y = min(max(x, xmin), xmax);
 end
 
+function dst = mergeStructRecursive(dst, src)
+
+    names = fieldnames(src);
+
+    for i = 1:numel(names)
+        name = names{i};
+
+        if isstruct(src.(name)) ...
+                && isfield(dst, name) ...
+                && isstruct(dst.(name))
+            dst.(name) = mergeStructRecursive(dst.(name), src.(name));
+        else
+            dst.(name) = src.(name);
+        end
+    end
+end
+
+function [forceDist, momentDist] = disturbanceAtTime(t, par)
+
+    forceDist = zeros(3,1);
+    momentDist = zeros(3,1);
+
+    if ~isfield(par, 'disturbance') || ~par.disturbance.enabled
+        return;
+    end
+
+    d = par.disturbance;
+    distType = string(getStructField(d, 'type', "none"));
+
+    forceAmp = vector3(getStructField(d, 'forceAmp', 0));
+    momentAmp = vector3(getStructField(d, 'momentAmp', 0));
+
+    switch distType
+        case "sin"
+            forceFreq = vector3(getStructField(d, 'forceFreq', [0.31; 0.47; 0.61]));
+            momentFreq = vector3(getStructField(d, 'momentFreq', [0.43; 0.59; 0.73]));
+            forcePhase = vector3(getStructField(d, 'forcePhase', zeros(3,1)));
+            momentPhase = vector3(getStructField(d, 'momentPhase', zeros(3,1)));
+
+            forceDist = forceAmp .* sin(2*pi*forceFreq*t + forcePhase);
+            momentDist = momentAmp .* sin(2*pi*momentFreq*t + momentPhase);
+
+        case "random"
+            seed = double(getStructField(d, 'seed', 1));
+            holdTime = max(double(getStructField(d, 'randomHold', 0.05)), eps);
+            sampleIdx = floor(t/holdTime);
+
+            forceDist = forceAmp .* pseudoRandomSignedVector(seed, sampleIdx, 1);
+            momentDist = momentAmp .* pseudoRandomSignedVector(seed, sampleIdx, 2);
+
+        case "none"
+            return;
+
+        otherwise
+            error("Unknown disturbance type.");
+    end
+end
+
+function value = getStructField(s, name, defaultValue)
+
+    if isfield(s, name)
+        value = s.(name);
+    else
+        value = defaultValue;
+    end
+end
+
+function v = vector3(x)
+
+    if isscalar(x)
+        v = repmat(x, 3, 1);
+    else
+        v = x(:);
+    end
+
+    if numel(v) ~= 3
+        error("Disturbance amplitude/frequency/phase must be scalar or 3x1.");
+    end
+end
+
+function r = pseudoRandomSignedVector(seed, sampleIdx, channel)
+
+    base = seed + 1009*double(sampleIdx) + 9176*channel + [37; 73; 109];
+    x = sin(base*12.9898).*43758.5453;
+    r = 2*(x - floor(x)) - 1;
+end
+
 %% ========================================================================
 %% Analytic horizontal figure-eight
 function ref = evalFigure8Horizontal(t)
@@ -485,13 +606,17 @@ end
 function ref = evalHelixFlip(t)
 
     vx = 0.30;
-    Ay = 0.80;
-    Az = 0.80;
+    Ay = 1.00;
+    Az = 1.00;
     hHover = 1.30;
     hCenter = hHover + Az;
-    Tturn = 1.65;
+    % The global scale_range speeds the reference up near the end of the
+    % benchmark. Use a wider, slower base flip so the vehicle still performs a
+    % full loop/flip but can recover and track the ending instead of producing
+    % saturation-driven outliers.
+    Tturn = 3.20;
     tHover = 1.0;
-    tRamp = 1.50;
+    tRamp = 2.00;
     Om = 2*pi/Tturn;
 
     if t <= tHover
@@ -599,7 +724,11 @@ end
 function ref = evalFastCircle(t)
 
     radius = 5.0;
-    Tcircle = 2.5;
+    % The benchmark may apply progress.scaleRange = [2, 0.5], which doubles
+    % the reference speed at the end and quadruples the centripetal
+    % acceleration. Use a milder base period so the scaled fast_circle remains
+    % a tracking/disturbance test instead of an actuator-saturation test.
+    Tcircle = 5.0;
     h0 = 5.0;
     Om = 2*pi/Tcircle;
 
@@ -1946,23 +2075,28 @@ end
 
 %% ========================================================================
 %% Quadrotor model layer
-function xNext = stepModel(x, u, par)
+function xNext = stepModel(x, u, par, t0)
+
+    if nargin < 4
+        t0 = 0;
+    end
 
     switch par.integratorName
         case "ode45"
-            xNext = stepModelODE45(x, u, par);
+            xNext = stepModelODE45(x, u, par, t0);
         case "lie_rk4"
-            xNext = stepModelLieRK4(x, u, par);
+            xNext = stepModelLieRK4(x, u, par, t0);
         otherwise
             error("Unknown integratorName.");
     end
 end
 
-function xNext = stepModelODE45(x, u, par)
+function xNext = stepModelODE45(x, u, par, t0)
 
     y0 = [x.p; x.v; reshape(x.R, 9, 1); x.Omega];
     opts = odeset('RelTol', 1e-7, 'AbsTol', 1e-9);
-    [~, yHist] = ode45(@(t,y) quadrotorOde(t, y, u, par), [0 par.dt], y0, opts);
+    [~, yHist] = ode45(@(t,y) quadrotorOde(t, y, u, par), ...
+        [t0, t0 + par.dt], y0, opts);
 
     y = yHist(end,:)';
     xNext.p = y(1:3);
@@ -1985,27 +2119,27 @@ function yDot = quadrotorOde(~, y, u, par)
             OmegaDot];
 end
 
-function xNext = stepModelLieRK4(x, u, par)
+function xNext = stepModelLieRK4(x, u, par, t0)
 
     h = par.dt;
 
     Om1 = x.Omega;
-    [a1, OmDot1] = rigidBodyRates(x.R, Om1, u, par);
+    [a1, OmDot1] = rigidBodyRates(x.R, Om1, u, par, t0);
 
     v2 = x.v + 0.5*h*a1;
     R2 = x.R*expm(0.5*h*hat(Om1));
     Om2 = x.Omega + 0.5*h*OmDot1;
-    [a2, OmDot2] = rigidBodyRates(R2, Om2, u, par);
+    [a2, OmDot2] = rigidBodyRates(R2, Om2, u, par, t0 + 0.5*h);
 
     v3 = x.v + 0.5*h*a2;
     R3 = x.R*expm(0.5*h*hat(Om2));
     Om3 = x.Omega + 0.5*h*OmDot2;
-    [a3, OmDot3] = rigidBodyRates(R3, Om3, u, par);
+    [a3, OmDot3] = rigidBodyRates(R3, Om3, u, par, t0 + 0.5*h);
 
     v4 = x.v + h*a3;
     R4 = x.R*expm(h*hat(Om3));
     Om4 = x.Omega + h*OmDot3;
-    [a4, OmDot4] = rigidBodyRates(R4, Om4, u, par);
+    [a4, OmDot4] = rigidBodyRates(R4, Om4, u, par, t0 + h);
 
     OmegaBar = (Om1 + 2*Om2 + 2*Om3 + Om4)/6;
 
@@ -2015,10 +2149,16 @@ function xNext = stepModelLieRK4(x, u, par)
     xNext.Omega = x.Omega + h/6*(OmDot1 + 2*OmDot2 + 2*OmDot3 + OmDot4);
 end
 
-function [a, OmegaDot] = rigidBodyRates(R, Omega, u, par)
+function [a, OmegaDot] = rigidBodyRates(R, Omega, u, par, t)
 
-    a = par.g*par.e3 - u.T/par.m*R*par.e3;
-    OmegaDot = par.J \ (u.tau - cross(Omega, par.J*Omega));
+    if nargin < 5
+        t = 0;
+    end
+
+    [forceDist, momentDist] = disturbanceAtTime(t, par);
+
+    a = par.g*par.e3 - u.T/par.m*R*par.e3 + forceDist/par.m;
+    OmegaDot = par.J \ (u.tau + momentDist - cross(Omega, par.J*Omega));
 end
 
 function R = projectSO3(R)
