@@ -2,9 +2,7 @@
 % Run this file directly, just like main.m.
 %
 % This benchmark adds force/moment disturbances to the plant and compares
-% controller tracking error. The boxplots use all discrete simulation-time
-% tracking-error samples from each run, so the default only needs one run per
-% trajectory/controller/disturbance level.
+% absolute position tracking error, ||p - pd||.
 
 clear; clc; close all;
 
@@ -12,33 +10,41 @@ clear; clc; close all;
 %% 0. What to Run
 
 % Available:
-%   "fast_circle"
 %   "figure8_horizontal"
+%   "figure8_vertical"
 %   "helix_flip"
-trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
+%   "flip_loop_sine"
+%   "fast_circle"
+% trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
+trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_sine",  "fast_circle"];
+
 
 % Available controllers for this comparison:
 %   "geometric"
-%   "on_manifold_mpc"
+%   "lu_on_manifold_lqr"
 %   "geometric_indi"
-controllerNames = ["geometric", "on_manifold_mpc", "geometric_indi"];
-
-% Default is 1 because each boxplot is built from all time samples in a run.
-% Increase this only if you want several random disturbance phases combined.
-numTrials = 1;
+controllerNames = ["geometric", "faessler", "lee", "johnson_beard", "sun_dfbc", "sun_dfbc_indi","geometric_indi", "tal_karaman"];
+% controllerNames = ["lu_on_manifold_lqr", "sun_linear_mpc", "sun_nmpc_full", "sun_linear_mpc_indi"];
 
 %% ========================================================================
 %% 1. Disturbance Settings
 
-% "sin"    : sinusoidal disturbance; each trial uses a different phase.
-% "random" : sample-held random disturbance.
-disturbanceType = "sin";
+% Use a fixed-direction disturbance instead of a sign-changing multi-axis
+% sinusoid. With zero frequency and pi/2 phase, sin(...) = 1, so the
+% disturbance is a deterministic bias along these directions. For helix_flip,
+% the lateral loop axis avoids the disturbance periodically helping the flip.
+forceDirection = [0; 1; 0];
+momentDirection = [0; 0; 1];
+forceFreq = [0; 0; 0];
+momentFreq = [0; 0; 0];
+forcePhase = [pi/2; pi/2; pi/2];
+momentPhase = [pi/2; pi/2; pi/2];
 
 % Three disturbance levels: force is NED-frame [N], moment is body-frame [N*m].
 disturbanceLevels = struct( ...
     'name',     {'low', 'medium', 'high'}, ...
-    'forceAmp', {0.05,  0.15,     0.30}, ...
-    'momentAmp',{0.002, 0.006,    0.012});
+    'forceAmp', {0.1,  0.2,     0.3}, ...
+    'momentAmp',{0.1, 0.2,    0.3});
 
 %% ========================================================================
 %% 2. Plot Setting
@@ -61,10 +67,14 @@ errorSampleStride = 1;
 
 cfg.trajNames = trajNames;
 cfg.controllerNames = controllerNames;
-cfg.numTrials = numTrials;
 
-cfg.disturbanceType = disturbanceType;
 cfg.levels = disturbanceLevels;
+cfg.forceDirection = forceDirection;
+cfg.momentDirection = momentDirection;
+cfg.forceFreq = forceFreq;
+cfg.momentFreq = momentFreq;
+cfg.forcePhase = forcePhase;
+cfg.momentPhase = momentPhase;
 
 cfg.savePlots = savePlots;
 

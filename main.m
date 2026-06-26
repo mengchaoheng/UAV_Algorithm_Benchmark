@@ -37,14 +37,14 @@ par.m = 1.0;
 par.J = diag([0.07, 0.07, 0.12]);
 
 par.dt = 0.01;          % 100 Hz
-par.Tend = 15.0;
+par.Tend = 20.0;
 par.integratorName = "ode45";  % "ode45" or "lie_rk4"
 
 % Reference time scaling.
 % scale > 1 slows the reference; scale < 1 speeds it up and may saturate control.
 par.progress.mode = "scale_range";      % "scale_fixed" or "scale_range"
-par.progress.scale = 2.5;               % scale_fixed: constant time scale
-par.progress.scaleRange = [2, 1];   % scale_range: start/end scale over the simulation
+par.progress.scale = 0.8;               % scale_fixed: constant time scale
+par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the simulation
 
 % Available choices:
 %   "figure8_horizontal"
@@ -52,14 +52,18 @@ par.progress.scaleRange = [2, 1];   % scale_range: start/end scale over the simu
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "helix_flip";
+par.trajName = "figure8_horizontal";
+
+% One knob for all trajectory shapes. The factory below converts it into
+% periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
+par.trajIntensity = 1;  % 0 = gentle, 1 = near the actuator envelope
+par.flipTurns = 3;         % flip trajectories: turns during the second half
 
 % controller
-% "geometric", "lee", "johnson_beard"
-% "sun_dfbc", "sun_dfbc_indi", "faessler"
-% "on_manifold_mpc", "sun_nmpc", "sun_nmpc_full", "sun_nmpc_indi"
+% "geometric", "faessler", "lee", "johnson_beard", "sun_dfbc", "sun_dfbc_indi"
+% "lu_on_manifold_lqr", "sun_linear_mpc", "sun_nmpc_full", "sun_linear_mpc_indi"
 % "geometric_indi", "tal_karaman"
-par.controllerName = "on_manifold_mpc";  
+par.controllerName = "geometric";
 % Simple controller gains
 par.Kp = diag([20, 20, 25]);
 par.Kv = diag([9, 9, 10]);
@@ -84,7 +88,7 @@ par.johnsonBeard.Kv = par.Kv;
 par.johnsonBeard.KR = par.KR;
 par.johnsonBeard.KOmega = par.KOmega;
 
-% On-manifold finite-horizon controller.
+% Lu et al. on-manifold finite-horizon LQR approximation.
 % State error: [p-pd; v-vd; Log(Rd'R)], input: [aT-aTd; Omega-OmegaD].
 par.mpc.N = 16; % Lu et al. use N=8; use longer horizon for the simulated rate loop.
 par.mpc.Q = diag([450, 450, 650, ...
@@ -122,7 +126,7 @@ par.sun.KOmega = par.KOmega;
 % Here the dynamics are full nonlinear, while control allocation is simplified
 % to total thrust and body moments [T; tau]. MATLAB fmincon is far slower
 % than ACADO/acados, so the default full-NMPC path uses single shooting and
-% falls back to sun_nmpc if the nonlinear solve fails.
+% falls back to sun_linear_mpc if the nonlinear solve fails.
 par.sunFull.N = par.sun.N;
 par.sunFull.dt = par.sun.dt;
 par.sunFull.solvePeriod = 0.10;
@@ -195,15 +199,13 @@ par.tauMax = [8; 8; 8];
 % [N*m], matching the plant translational and rotational equations below.
 % The default is disabled, so normal single-run behavior is unchanged.
 par.disturbance.enabled = false;
-par.disturbance.type = "none";       % "none", "sin", or "random"
+par.disturbance.type = "none";       % "none" or "sin"
 par.disturbance.forceAmp = 0;        % scalar or 3x1 per-axis amplitude [N]
 par.disturbance.momentAmp = 0;       % scalar or 3x1 per-axis amplitude [N*m]
 par.disturbance.forceFreq = [0.31; 0.47; 0.61];   % sinusoid frequencies [Hz]
 par.disturbance.momentFreq = [0.43; 0.59; 0.73];  % sinusoid frequencies [Hz]
 par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
 par.disturbance.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
-par.disturbance.seed = 1;
-par.disturbance.randomHold = 0.05;   % random disturbance sample hold [s]
 
 % Initial condition
 par.startOnReference = true;
@@ -334,32 +336,39 @@ end
 %% Trajectory factory
 function traj = makeTrajectory(par)
 
+    shape = trajectoryShape(par);
+
     switch par.trajName
 
         case "figure8_horizontal"
             traj.name = "figure8_horizontal";
-            traj.Tend = 12.0;
-            traj.eval = @(t) evalFigure8Horizontal(t);
+            traj.Tend = par.Tend;
+            cfg = makeFigure8HorizontalParams(shape);
+            traj.eval = @(t) evalFigure8Horizontal(t, cfg);
 
         case "figure8_vertical"
             traj.name = "figure8_vertical";
             traj.Tend = par.Tend;
-            traj.eval = @(t) evalFigure8Vertical(t);
+            cfg = makeFigure8VerticalParams(shape);
+            traj.eval = @(t) evalFigure8Vertical(t, cfg);
 
         case "helix_flip"
             traj.name = "helix_flip";
             traj.Tend = par.Tend;
-            traj.eval = @(t) evalHelixFlip(t);
+            cfg = makeFlipLoopParams(shape, 0.30, 1.30, 0.85);
+            traj.eval = @(t) evalFlipLoop(t, cfg);
 
         case "flip_loop_sine"
             traj.name = "flip_loop_sine";
             traj.Tend = par.Tend;
-            traj.eval = @(t) evalFlipLoopSine(t);
+            cfg = makeFlipLoopParams(shape, 0.00, 1.50, 1.00);
+            traj.eval = @(t) evalFlipLoop(t, cfg);
 
         case "fast_circle"
             traj.name = "fast_circle";
             traj.Tend = par.Tend;
-            traj.eval = @(t) evalFastCircle(t);
+            cfg = makeFastCircleParams(shape);
+            traj.eval = @(t) evalFastCircle(t, cfg);
 
         otherwise
             error("Unknown trajectory name.");
@@ -443,6 +452,115 @@ function y = clampScalar(x, xmin, xmax)
     y = min(max(x, xmin), xmax);
 end
 
+function scale = trajectoryScaleAtFraction(par, fraction)
+
+    fraction = clampScalar(fraction, 0, 1);
+
+    if ~isfield(par, 'progress') || ~isfield(par.progress, 'mode')
+        scale = 1;
+        return;
+    end
+
+    switch string(par.progress.mode)
+        case "scale_range"
+            scaleRange = par.progress.scaleRange;
+            scale = scaleRange(1) + (scaleRange(2) - scaleRange(1))*fraction;
+        case "scale_fixed"
+            scale = par.progress.scale;
+        otherwise
+            scale = 1;
+    end
+
+    scale = max(scale, eps);
+end
+
+function s = trajectoryBaseTimeAtFraction(par, fraction)
+
+    fraction = clampScalar(fraction, 0, 1);
+
+    if ~isfield(par, 'progress') || ~isfield(par.progress, 'mode')
+        s = fraction*par.Tend;
+        return;
+    end
+
+    switch string(par.progress.mode)
+        case "scale_range"
+            scale0 = par.progress.scaleRange(1);
+            scale1 = par.progress.scaleRange(2);
+            scaleDot = (scale1 - scale0)/par.Tend;
+            scale = scale0 + (scale1 - scale0)*fraction;
+
+            if abs(scaleDot) < 1e-12
+                s = fraction*par.Tend/scale0;
+            else
+                s = log(scale/scale0)/scaleDot;
+            end
+
+        case "scale_fixed"
+            s = fraction*par.Tend/par.progress.scale;
+
+        otherwise
+            s = fraction*par.Tend;
+    end
+end
+
+function shape = trajectoryShape(par)
+
+    intensity = clampScalar(getStructField(par, 'trajIntensity', 0.75), 0, 1);
+    scaleHalf = trajectoryScaleAtFraction(par, 0.5);
+    scaleEnd = trajectoryScaleAtFraction(par, 1.0);
+    sHalf = trajectoryBaseTimeAtFraction(par, 0.5);
+    sEnd = trajectoryBaseTimeAtFraction(par, 1.0);
+    flipTurns = max(double(getStructField(par, 'flipTurns', 3)), 0.5);
+
+    thrustAccel = max(par.Tmax/max(par.m, eps) - par.g, 0.5*par.g);
+    alphaMax = angularAccelLimit(par);
+
+    shape.g = par.g;
+    shape.scaleEnd = scaleEnd;
+    shape.regularAccel = max((0.18 + 0.20*intensity)*thrustAccel*scaleEnd^2, ...
+        0.10*par.g*scaleEnd^2);
+
+    frontFlipMax = (0.93 + 0.04*intensity)*par.g*scaleHalf^2;
+    rearFlipMin = (1.02 + 0.10*intensity)*par.g*scaleEnd^2;
+    rearFlipTarget = (1.08 + 0.35*intensity ...
+                    + 0.80*max(flipTurns - 1, 0))*par.g*scaleEnd^2;
+    thrustFlipMax = ((0.70 + 0.18*intensity)*par.Tmax/max(par.m, eps) ...
+                   - par.g)*scaleEnd^2;
+    flipCap = min([frontFlipMax, rearFlipTarget, thrustFlipMax]);
+    shape.flipAccel = min(frontFlipMax, max(rearFlipMin, flipCap));
+
+    shape.loopOmega = clampScalar((0.22 + 0.08*intensity)*sqrt(alphaMax), ...
+        1.80, 3.00);
+    shape.rampTime = clampScalar(0.5*pi*shape.loopOmega ...
+        / max((0.12 + 0.08*intensity)*alphaMax, eps), 1.80, 3.20);
+    shape.flipTurns = flipTurns;
+    shape.flipSpan = max(sEnd - sHalf, eps);
+end
+
+function alphaMax = angularAccelLimit(par)
+
+    Jdiag = abs(diag(par.J));
+    tauMax = abs(par.tauMax(:));
+    n = min(numel(Jdiag), numel(tauMax));
+
+    if n == 0
+        alphaMax = 80;
+        return;
+    end
+
+    alpha = tauMax(1:n)./max(Jdiag(1:n), eps);
+    alpha = alpha(isfinite(alpha) & alpha > 0);
+
+    if isempty(alpha)
+        alphaMax = 80;
+    else
+        alphaMax = min(alpha);
+    end
+
+    alphaMax = max(alphaMax, eps);
+end
+
 function dst = mergeStructRecursive(dst, src)
 
     names = fieldnames(src);
@@ -485,14 +603,6 @@ function [forceDist, momentDist] = disturbanceAtTime(t, par)
             forceDist = forceAmp .* sin(2*pi*forceFreq*t + forcePhase);
             momentDist = momentAmp .* sin(2*pi*momentFreq*t + momentPhase);
 
-        case "random"
-            seed = double(getStructField(d, 'seed', 1));
-            holdTime = max(double(getStructField(d, 'randomHold', 0.05)), eps);
-            sampleIdx = floor(t/holdTime);
-
-            forceDist = forceAmp .* pseudoRandomSignedVector(seed, sampleIdx, 1);
-            momentDist = momentAmp .* pseudoRandomSignedVector(seed, sampleIdx, 2);
-
         case "none"
             return;
 
@@ -523,33 +633,31 @@ function v = vector3(x)
     end
 end
 
-function r = pseudoRandomSignedVector(seed, sampleIdx, channel)
-
-    base = seed + 1009*double(sampleIdx) + 9176*channel + [37; 73; 109];
-    x = sin(base*12.9898).*43758.5453;
-    r = 2*(x - floor(x)) - 1;
-end
-
 %% ========================================================================
 %% Analytic horizontal figure-eight
-function ref = evalFigure8Horizontal(t)
+function cfg = makeFigure8HorizontalParams(shape)
 
-    Ax = 4.0;
-    Ay = 2.5;
-    h0 = 3.0;
-    Tfig = 12.0;
-    Om = 2*pi/Tfig;
+    cfg.Ax = 4.0;
+    cfg.Ay = 2.5;
+    cfg.h0 = 3.0;
+    cfg.Tfig = periodForAccel(max(cfg.Ax, 4*cfg.Ay), ...
+        shape.regularAccel, 7.0, 13.0);
+end
 
-    ref.p = [Ax*sin(Om*t);
-             Ay*sin(2*Om*t);
-            -h0];
+function ref = evalFigure8Horizontal(t, cfg)
 
-    ref.v = [Ax*Om*cos(Om*t);
-             2*Ay*Om*cos(2*Om*t);
+    Om = 2*pi/cfg.Tfig;
+
+    ref.p = [cfg.Ax*sin(Om*t);
+             cfg.Ay*sin(2*Om*t);
+            -cfg.h0];
+
+    ref.v = [cfg.Ax*Om*cos(Om*t);
+             2*cfg.Ay*Om*cos(2*Om*t);
              0];
 
-    ref.a = [-Ax*Om^2*sin(Om*t);
-             -4*Ay*Om^2*sin(2*Om*t);
+    ref.a = [-cfg.Ax*Om^2*sin(Om*t);
+             -4*cfg.Ay*Om^2*sin(2*Om*t);
              0];
 
     ref.psi = atan2(ref.v(2), ref.v(1));
@@ -557,67 +665,82 @@ end
 
 %% ========================================================================
 %% Analytic vertical figure-eight
-function ref = evalFigure8Vertical(t)
+function cfg = makeFigure8VerticalParams(shape)
 
-    Ay = 1.15;
-    Az = 1.00;
-    hLow = 1.35;
-    hCenter = hLow + Az;
-    Tfig = 5.50;
-    tHover = 1.0;
-    tRamp = 1.50;
-    Om = 2*pi/Tfig;
-    theta0 = -pi/4;
+    cfg.Ay = 1.15;
+    cfg.Az = 1.00;
+    cfg.hLow = 1.35;
+    cfg.tHover = 1.0;
+    cfg.tRamp = 1.50;
+    cfg.theta0 = -pi/4;
+    accelLimit = min(shape.regularAccel, 0.80*shape.g*shape.scaleEnd^2);
+    cfg.Tfig = periodForAccel(max(cfg.Ay, 4*cfg.Az), ...
+        accelLimit, 4.8, 8.0);
+end
 
-    if t <= tHover
-        ref.p = [0; -Ay/sqrt(2); -hLow];
+function ref = evalFigure8Vertical(t, cfg)
+
+    hCenter = cfg.hLow + cfg.Az;
+    Om = 2*pi/cfg.Tfig;
+
+    if t <= cfg.tHover
+        ref.p = [0; -cfg.Ay/sqrt(2); -cfg.hLow];
         ref.v = [0; 0; 0];
         ref.a = [0; 0; 0];
         ref.psi = 0;
         return;
     end
 
-    tau = t - tHover;
-    [q, qDot, qDDot] = rampedTime(tau, tRamp);
+    tau = t - cfg.tHover;
+    [q, qDot, qDDot] = rampedTime(tau, cfg.tRamp);
 
-    theta = theta0 + Om*q;
+    theta = cfg.theta0 + Om*q;
     thetaDot = Om*qDot;
     thetaDDot = Om*qDDot;
 
-    h = hCenter + Az*sin(2*theta);
+    h = hCenter + cfg.Az*sin(2*theta);
 
     ref.p = [0;
-             Ay*sin(theta);
+             cfg.Ay*sin(theta);
             -h];
 
     ref.v = [0;
-             Ay*cos(theta)*thetaDot;
-            -2*Az*cos(2*theta)*thetaDot];
+             cfg.Ay*cos(theta)*thetaDot;
+            -2*cfg.Az*cos(2*theta)*thetaDot];
 
     ref.a = [0;
-             Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
-             4*Az*sin(2*theta)*thetaDot^2 - 2*Az*cos(2*theta)*thetaDDot];
+             cfg.Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
+             4*cfg.Az*sin(2*theta)*thetaDot^2 ...
+             - 2*cfg.Az*cos(2*theta)*thetaDDot];
 
     ref.psi = 0;
 end
 
 %% ========================================================================
 %% Analytic helix with flips
-function ref = evalHelixFlip(t)
+function cfg = makeFlipLoopParams(shape, vx, hHover, yRadiusRatio)
 
-    vx = 0.30;
-    Ay = 1.00;
-    Az = 1.00;
-    hHover = 1.30;
+    loopOmega = max(shape.loopOmega, 2*pi*shape.flipTurns/shape.flipSpan);
+
+    cfg.vx = vx;
+    cfg.hHover = hHover;
+    cfg.tHover = 1.0;
+    cfg.tRamp = shape.rampTime;
+    cfg.Az = clampScalar(shape.flipAccel/loopOmega^2, 0.25, 5.00);
+    cfg.Ay = clampScalar(yRadiusRatio*cfg.Az, 0.20, 5.00);
+    cfg.Tturn = 2*pi/loopOmega;
+end
+
+function ref = evalFlipLoop(t, cfg)
+
+    vx = cfg.vx;
+    Ay = cfg.Ay;
+    Az = cfg.Az;
+    hHover = cfg.hHover;
     hCenter = hHover + Az;
-    % The global scale_range speeds the reference up near the end of the
-    % benchmark. Use a wider, slower base flip so the vehicle still performs a
-    % full loop/flip but can recover and track the ending instead of producing
-    % saturation-driven outliers.
-    Tturn = 3.20;
-    tHover = 1.0;
-    tRamp = 2.00;
-    Om = 2*pi/Tturn;
+    tHover = cfg.tHover;
+    tRamp = cfg.tRamp;
+    Om = 2*pi/cfg.Tturn;
 
     if t <= tHover
         ref.p = [0; 0; -hHover];
@@ -651,51 +774,6 @@ function ref = evalHelixFlip(t)
     ref.psi = 0;
 end
 
-%% ========================================================================
-%% Analytic vertical flip loop
-function ref = evalFlipLoopSine(t)
-
-    Ay = 1.0;
-    Az = 1.5;
-    hHover = 1.5;
-    hCenter = hHover + Az;
-    Tloop = 1.90;
-    tHover = 1.0;
-    tRamp = 1.50;
-    Om = 2*pi/Tloop;
-
-    if t <= tHover
-        ref.p = [0; 0; -hHover];
-        ref.v = [0; 0; 0];
-        ref.a = [0; 0; 0];
-        ref.psi = 0;
-        return;
-    end
-
-    tau = t - tHover;
-    [q, qDot, qDDot] = rampedTime(tau, tRamp);
-
-    theta = pi + Om*q;
-    thetaDot = Om*qDot;
-    thetaDDot = Om*qDDot;
-
-    h = hCenter + Az*cos(theta);
-
-    ref.p = [0;
-             Ay*sin(theta);
-            -h];
-
-    ref.v = [0;
-             Ay*cos(theta)*thetaDot;
-             Az*sin(theta)*thetaDot];
-
-    ref.a = [0;
-             Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
-             Az*(cos(theta)*thetaDot^2 + sin(theta)*thetaDDot)];
-
-    ref.psi = 0;
-end
-
 function [q, qDot, qDDot] = rampedTime(t, tRamp)
 
     if t <= 0
@@ -721,30 +799,36 @@ end
 
 %% ========================================================================
 %% Analytic fast horizontal circle
-function ref = evalFastCircle(t)
+function cfg = makeFastCircleParams(shape)
 
-    radius = 5.0;
-    % The benchmark may apply progress.scaleRange = [2, 0.5], which doubles
-    % the reference speed at the end and quadruples the centripetal
-    % acceleration. Use a milder base period so the scaled fast_circle remains
-    % a tracking/disturbance test instead of an actuator-saturation test.
-    Tcircle = 5.0;
-    h0 = 5.0;
-    Om = 2*pi/Tcircle;
+    cfg.radius = 5.0;
+    cfg.h0 = 5.0;
+    cfg.Tcircle = periodForAccel(cfg.radius, shape.regularAccel, 5.0, 10.0);
+end
 
-    ref.p = [radius*cos(Om*t);
-             radius*sin(Om*t);
-            -h0];
+function ref = evalFastCircle(t, cfg)
 
-    ref.v = [-radius*Om*sin(Om*t);
-              radius*Om*cos(Om*t);
+    Om = 2*pi/cfg.Tcircle;
+
+    ref.p = [cfg.radius*cos(Om*t);
+             cfg.radius*sin(Om*t);
+            -cfg.h0];
+
+    ref.v = [-cfg.radius*Om*sin(Om*t);
+              cfg.radius*Om*cos(Om*t);
               0];
 
-    ref.a = [-radius*Om^2*cos(Om*t);
-             -radius*Om^2*sin(Om*t);
-              0];
+    ref.a = [-cfg.radius*Om^2*cos(Om*t);
+             -cfg.radius*Om^2*sin(Om*t);
+             0];
 
     ref.psi = atan2(ref.v(2), ref.v(1));
+end
+
+function T = periodForAccel(lengthCoeff, accelLimit, Tmin, Tmax)
+
+    T = 2*pi*sqrt(max(lengthCoeff, eps)/max(accelLimit, eps));
+    T = clampScalar(T, Tmin, Tmax);
 end
 
 %% Controller layer
@@ -757,18 +841,18 @@ function u = controller(x, ref, traj, t, par)
             u = controllerLee(x, ref, t, par);
         case "johnson_beard"
             u = controllerJohnsonBeard(x, ref, t, par);
-        case "sun_nmpc"
-            u = controllerSunNMPC(x, ref, traj, t, par);
+        case "sun_linear_mpc"
+            u = controllerSunLinearMPC(x, ref, traj, t, par);
         case "sun_nmpc_full"
             u = controllerSunNMPCFull(x, ref, traj, t, par);
         case "sun_dfbc"
             u = controllerSunDFBC(x, ref, traj, t, par);
-        case "sun_nmpc_indi"
-            u = controllerSunNMPCINDI(x, ref, traj, t, par);
+        case "sun_linear_mpc_indi"
+            u = controllerSunLinearMPCINDI(x, ref, traj, t, par);
         case "sun_dfbc_indi"
             u = controllerSunDFBCINDI(x, ref, traj, t, par);
-        case "on_manifold_mpc"
-            u = controllerOnManifoldMPC(x, ref, traj, t, par);
+        case "lu_on_manifold_lqr"
+            u = controllerLuOnManifoldLQR(x, ref, traj, t, par);
         case "geometric_indi"
             u = controllerGeometricINDI(x, ref, t, par);
         case "faessler"
@@ -1392,9 +1476,9 @@ function ff = talFlatnessReference(traj, t, par)
     ff.c = T/par.m;
 end
 
-function u = controllerSunNMPC(x, ref, traj, t, par)
+function u = controllerSunLinearMPC(x, ref, traj, t, par)
 
-    % Version map for the fast Sun NMPC variant:
+    % Version map for the Sun linear-MPC approximation:
     % - Paper: Eq. (10) is a nonlinear finite-horizon OCP over
     %   x = [xi; xidot; q; Omega] and rotor thrusts.
     % - Agilicious C++: implements that OCP with acados, state order
@@ -1406,7 +1490,7 @@ function u = controllerSunNMPC(x, ref, traj, t, par)
     %   replaces the nonlinear rotor-thrust OCP with a local finite-horizon
     %   LQR over virtual inputs [collective acceleration; body rate]. The
     %   output is converted to this framework's [T; tau].
-    cmd = sunNMPCCommand(x, ref, traj, t, par);
+    cmd = sunLinearMPCCommand(x, ref, traj, t, par);
     u = sunDirectMomentControl(x, cmd, par);
 end
 
@@ -1424,9 +1508,9 @@ function u = controllerSunNMPCFull(x, ref, traj, t, par)
     %   direct force/moment input [T; tau]. Rotor allocation is intentionally
     %   skipped; the paper's u_r is represented by the equivalent
     %   [T_ref; tau_ref]. If the solve is unavailable or worse than the fast
-    %   paper-adapted controller above, the function reports and uses fallback.
+    %   linear-MPC approximation above, the function reports and uses fallback.
 
-    fallback = controllerSunNMPC(x, ref, traj, t, par);
+    fallback = controllerSunLinearMPC(x, ref, traj, t, par);
     fallbackRaw = [fallback.T; fallback.tau];
     fallback.sunFullUsedFallback = true;
     fallback.sunFullSolved = false;
@@ -1437,7 +1521,7 @@ function u = controllerSunNMPCFull(x, ref, traj, t, par)
     % 3 invalid solve or bad exitflag, 4 optimizer cost worse than fallback.
 
     if exist('fmincon', 'file') ~= 2
-        warning('fmincon is unavailable; falling back to sun_nmpc.');
+        warning('fmincon is unavailable; falling back to sun_linear_mpc.');
         fallback.sunFullFallbackCode = 1;
         u = fallback;
         return;
@@ -1706,11 +1790,11 @@ function u = controllerSunDFBC(x, ref, traj, t, par)
     u = sunDirectMomentControl(x, cmd, par);
 end
 
-function u = controllerSunNMPCINDI(x, ref, traj, t, par)
+function u = controllerSunLinearMPCINDI(x, ref, traj, t, par)
 
     persistent st
 
-    cmd = sunNMPCCommand(x, ref, traj, t, par);
+    cmd = sunLinearMPCCommand(x, ref, traj, t, par);
     [u, st] = sunINDIMomentControl(x, cmd, t, par, st);
 end
 
@@ -1722,12 +1806,12 @@ function u = controllerSunDFBCINDI(x, ref, traj, t, par)
     [u, st] = sunINDIMomentControl(x, cmd, t, par, st);
 end
 
-function cmd = sunNMPCCommand(x, ref, traj, t, par)
+function cmd = sunLinearMPCCommand(x, ref, traj, t, par)
 
-    % Fast Sun NMPC details:
+    % Sun linear-MPC approximation details:
     % Paper Eq. (10) would optimize the nonlinear model over
     % x = [xi; xidot; q; Omega] and rotor thrusts. That exact problem is the
-    % job of controllerSunNMPCFull below. This fast variant keeps the paper's
+    % job of controllerSunNMPCFull below. This approximation keeps the paper's
     % MPC structure but uses a local model-predictive LQR so it can run inside
     % the simple MATLAB simulation loop.
     %
@@ -1897,7 +1981,7 @@ function R = sunReferenceAttitudeOnly(ref, par)
     [R, ~] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
 end
 
-function u = controllerOnManifoldMPC(x, ref, traj, t, par)
+function u = controllerLuOnManifoldLQR(x, ref, traj, t, par)
 
     [Rd, aTd, OmegaD] = referenceInputOnManifold(ref, traj, t, par);
 
@@ -2236,6 +2320,116 @@ function plotResults(time, log, par, traj)
     end
 
     legend('actual','reference/command');
+
+    plotDerivativeTracking(time, log, par, traj);
+end
+
+function plotDerivativeTracking(time, log, par, traj)
+
+    accActual = loggedLinearAcceleration(log, par);
+    [omegaRef, alphaRef] = rotationLogRates(log.Rd, time);
+    alphaActual = loggedAngularAcceleration(log, par);
+
+    figure('Name','velocity and acceleration tracking');
+
+    labels = {'v_x (m/s)', 'v_y (m/s)', 'v_z (m/s)', ...
+              'a_x (m/s^2)', 'a_y (m/s^2)', 'a_z (m/s^2)'};
+    actual = [log.v; accActual];
+    desired = [log.vd; log.ad];
+
+    for i = 1:6
+        subplot(6,1,i);
+        plot(time, actual(i,:), 'LineWidth', 1.1); hold on;
+        plot(time, desired(i,:), '--', 'LineWidth', 1.1);
+        grid on;
+        ylabel(labels{i});
+
+        if i == 1
+            title("Velocity/acceleration tracking: " + traj.name);
+        end
+
+        if i == 6
+            xlabel('time (s)');
+        end
+    end
+
+    legend('actual','reference');
+
+    figure('Name','angular velocity and angular acceleration tracking');
+
+    labels = {'\Omega_x (rad/s)', '\Omega_y (rad/s)', '\Omega_z (rad/s)', ...
+              '\dot{\Omega}_x (rad/s^2)', '\dot{\Omega}_y (rad/s^2)', ...
+              '\dot{\Omega}_z (rad/s^2)'};
+    actual = [log.Omega; alphaActual];
+    desired = [omegaRef; alphaRef];
+
+    for i = 1:6
+        subplot(6,1,i);
+        plot(time, actual(i,:), 'LineWidth', 1.1); hold on;
+        plot(time, desired(i,:), '--', 'LineWidth', 1.1);
+        grid on;
+        ylabel(labels{i});
+
+        if i == 1
+            title("Angular-rate/acceleration tracking: " + traj.name);
+        end
+
+        if i == 6
+            xlabel('time (s)');
+        end
+    end
+
+    legend('actual','reference');
+end
+
+function acc = loggedLinearAcceleration(log, par)
+
+    N = size(log.v, 2);
+    acc = zeros(3, N);
+
+    for k = 1:N
+        acc(:,k) = par.g*par.e3 ...
+            - log.T(k)/par.m*log.R(:,:,k)*par.e3 ...
+            + log.forceDist(:,k)/par.m;
+    end
+end
+
+function alpha = loggedAngularAcceleration(log, par)
+
+    N = size(log.Omega, 2);
+    alpha = zeros(3, N);
+
+    for k = 1:N
+        Omega = log.Omega(:,k);
+        alpha(:,k) = par.J \ (log.tau(:,k) + log.momentDist(:,k) ...
+            - cross(Omega, par.J*Omega));
+    end
+end
+
+function [omega, alpha] = rotationLogRates(RLog, time)
+
+    N = numel(time);
+    omega = zeros(3, N);
+    alpha = zeros(3, N);
+
+    if N < 2
+        return;
+    end
+
+    for k = 1:N-1
+        h = time(k+1) - time(k);
+        omega(:,k) = LogSO3(RLog(:,:,k)' * RLog(:,:,k+1))/h;
+    end
+
+    omega(:,N) = omega(:,N-1);
+
+    for k = 1:N-1
+        h = time(k+1) - time(k);
+        omegaNextAtK = RLog(:,:,k)' * RLog(:,:,k+1) * omega(:,k+1);
+        alpha(:,k) = (omegaNextAtK - omega(:,k))/h;
+    end
+
+    alpha(:,N) = alpha(:,N-1);
 end
 
 %% ========================================================================

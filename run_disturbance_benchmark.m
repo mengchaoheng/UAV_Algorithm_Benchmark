@@ -3,15 +3,15 @@ function results = run_disturbance_benchmark(cfg)
 %
 % Default comparison:
 %   trajectories : fast_circle, figure8_horizontal, helix_flip
-%   controllers  : geometric, on_manifold_mpc, geometric_indi
+%   controllers  : geometric, lu_on_manifold_lqr, geometric_indi
 %   disturbance  : low/medium/high additive force and moment amplitudes
 %
 % The script calls main.m in batch mode with parameter overrides, so main.m
 % remains the single source of truth for dynamics, trajectories, and
 % controllers. Results are stored as MAT/CSV files. By default the boxcharts
-% use all discrete-time tracking-error samples from each run, not repeated
-% Monte-Carlo trial scalars. Figures are always displayed; cfg.savePlots only
-% controls whether PNG copies are written to disk.
+% use all discrete-time tracking-error samples from each run. Figures are
+% always displayed; cfg.savePlots only controls whether PNG copies are
+% written to disk.
 
     if nargin < 1
         cfg = struct();
@@ -33,7 +33,7 @@ function results = run_disturbance_benchmark(cfg)
 
     levels = cfg.levels;
     nTotal = numel(cfg.trajNames) * numel(cfg.controllerNames) ...
-           * numel(levels) * cfg.numTrials;
+           * numel(levels);
 
     Trajectory = strings(nTotal,1);
     Controller = strings(nTotal,1);
@@ -41,8 +41,6 @@ function results = run_disturbance_benchmark(cfg)
     DisturbanceLevel = strings(nTotal,1);
     ForceAmpN = nan(nTotal,1);
     MomentAmpNm = nan(nTotal,1);
-    Trial = nan(nTotal,1);
-    Seed = nan(nTotal,1);
     RMSE = nan(nTotal,1);
     MeanError = nan(nTotal,1);
     P95Error = nan(nTotal,1);
@@ -63,63 +61,48 @@ function results = run_disturbance_benchmark(cfg)
             for iLevel = 1:numel(levels)
                 level = levels(iLevel);
 
-                for iTrial = 1:cfg.numTrials
-                    row = row + 1;
-                    seed = cfg.seed0 + 10000*iTraj + 1000*iCtrl ...
-                         + 100*iLevel + iTrial;
+                row = row + 1;
 
-                    Trajectory(row) = trajName;
-                    Controller(row) = controllerName;
-                    DisturbanceType(row) = cfg.disturbanceType;
-                    DisturbanceLevel(row) = string(level.name);
-                    ForceAmpN(row) = level.forceAmp;
-                    MomentAmpNm(row) = level.momentAmp;
-                    Trial(row) = iTrial;
-                    Seed(row) = seed;
+                Trajectory(row) = trajName;
+                Controller(row) = controllerName;
+                DisturbanceType(row) = "sin";
+                DisturbanceLevel(row) = string(level.name);
+                ForceAmpN(row) = level.forceAmp;
+                MomentAmpNm(row) = level.momentAmp;
 
-                    override = makeDisturbanceOverride( ...
-                        trajName, controllerName, level, seed, cfg);
+                override = makeDisturbanceOverride( ...
+                    trajName, controllerName, level, cfg);
 
-                    try
-                        clear('main'); % reset script-local persistent states.
-                        UAV_BENCHMARK_BATCH = true; %#ok<NASGU>
-                        UAV_BENCHMARK_PAR_OVERRIDE = override; %#ok<NASGU>
-                        run(fullfile(repoDir, 'main.m'));
+                [err, simOk, simMessage] = runBenchmarkSimulation(repoDir, override);
 
-                        err = vecnorm(log.p - log.pd, 2, 1);
-                        RMSE(row) = sqrt(mean(err.^2, 'omitnan'));
-                        MeanError(row) = mean(err, 'omitnan');
-                        P95Error(row) = prctile(err, 95);
-                        MaxError(row) = max(err);
-                        FinalError(row) = err(end);
-                        ErrorTrace{row} = err(1:cfg.errorSampleStride:end).';
-                        IsFinite(row) = all(isfinite(err)) ...
-                            && all(isfinite(log.T)) ...
-                            && all(isfinite(log.tau(:)));
+                if simOk
+                    RMSE(row) = sqrt(mean(err.^2, 'omitnan'));
+                    MeanError(row) = mean(err, 'omitnan');
+                    P95Error(row) = prctile(err, 95);
+                    MaxError(row) = max(err);
+                    FinalError(row) = err(end);
+                    ErrorTrace{row} = err(1:cfg.errorSampleStride:end).';
+                    IsFinite(row) = all(isfinite(err));
 
-                        fprintf(['[%3d/%3d] %-18s %-16s %-6s trial=%02d ' ...
-                            'rmse=%.4g p95=%.4g max=%.4g\n'], ...
-                            row, nTotal, trajName, controllerName, ...
-                            string(level.name), iTrial, RMSE(row), ...
-                            P95Error(row), MaxError(row));
+                    fprintf('[%3d/%3d] %-18s %-16s %-6s rmse=%.4g p95=%.4g max=%.4g\n', ...
+                        row, nTotal, trajName, controllerName, ...
+                        string(level.name), RMSE(row), P95Error(row), ...
+                        MaxError(row));
 
-                    catch ME
-                        ErrorMessage(row) = string(ME.message);
-                        fprintf('[%3d/%3d] FAILED %s %s %s trial=%02d: %s\n', ...
-                            row, nTotal, trajName, controllerName, ...
-                            string(level.name), iTrial, ME.message);
-                    end
-
-                    clear UAV_BENCHMARK_BATCH UAV_BENCHMARK_PAR_OVERRIDE
+                else
+                    ErrorMessage(row) = simMessage;
+                    fprintf('[%3d/%3d] FAILED %s %s %s: %s\n', ...
+                        row, nTotal, trajName, controllerName, ...
+                        string(level.name), simMessage);
                 end
             end
         end
     end
 
     results = table(Trajectory, Controller, DisturbanceType, ...
-        DisturbanceLevel, ForceAmpN, MomentAmpNm, Trial, Seed, ...
-        RMSE, MeanError, P95Error, MaxError, FinalError, ErrorTrace, ...
-        IsFinite, ErrorMessage);
+        DisturbanceLevel, ForceAmpN, MomentAmpNm, RMSE, MeanError, ...
+        P95Error, MaxError, FinalError, ErrorTrace, IsFinite, ...
+        ErrorMessage);
 
     figureFiles = strings(0,1);
 
@@ -151,16 +134,13 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
         cfg.trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
     end
     if ~isfield(cfg, 'controllerNames')
-        cfg.controllerNames = ["geometric", "on_manifold_mpc", "geometric_indi"];
+        cfg.controllerNames = ["geometric", "lu_on_manifold_lqr", "geometric_indi"];
     end
     if ~isfield(cfg, 'levels')
         cfg.levels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
             'forceAmp', {0.05,  0.15,     0.30}, ...
             'momentAmp',{0.002, 0.006,    0.012});
-    end
-    if ~isfield(cfg, 'numTrials')
-        cfg.numTrials = 1;
     end
     if ~isfield(cfg, 'boxDataSource')
         cfg.boxDataSource = "time_error"; % "time_error" or "rmse"
@@ -170,17 +150,14 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     else
         cfg.errorSampleStride = max(1, round(cfg.errorSampleStride));
     end
-    if ~isfield(cfg, 'disturbanceType')
-        cfg.disturbanceType = "sin"; % "sin" or "random"
+    if ~isfield(cfg, 'forcePhase')
+        cfg.forcePhase = [0; 2*pi/3; 4*pi/3];
+    end
+    if ~isfield(cfg, 'momentPhase')
+        cfg.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
     end
     if ~isfield(cfg, 'integratorName')
         cfg.integratorName = "lie_rk4"; % Faster for large sweeps; use "ode45" to match main default.
-    end
-    if ~isfield(cfg, 'randomHold')
-        cfg.randomHold = 0.05;
-    end
-    if ~isfield(cfg, 'seed0')
-        cfg.seed0 = 202601;
     end
     if ~isfield(cfg, 'progress')
         cfg.progress = struct(); % Empty means use main.m defaults.
@@ -196,7 +173,7 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     end
 end
 
-function override = makeDisturbanceOverride(trajName, controllerName, level, seed, cfg)
+function override = makeDisturbanceOverride(trajName, controllerName, level, cfg)
 
     override.trajName = trajName;
     override.controllerName = controllerName;
@@ -209,16 +186,70 @@ function override = makeDisturbanceOverride(trajName, controllerName, level, see
     end
 
     override.disturbance.enabled = true;
-    override.disturbance.type = cfg.disturbanceType;
-    override.disturbance.forceAmp = level.forceAmp;
-    override.disturbance.momentAmp = level.momentAmp;
-    override.disturbance.seed = seed;
-    override.disturbance.randomHold = cfg.randomHold;
+    override.disturbance.type = "sin";
+    override.disturbance.forceAmp = directedAmplitude( ...
+        level.forceAmp, cfg, 'forceDirection');
+    override.disturbance.momentAmp = directedAmplitude( ...
+        level.momentAmp, cfg, 'momentDirection');
+    if isfield(cfg, 'forceFreq')
+        override.disturbance.forceFreq = cfg.forceFreq;
+    end
+    if isfield(cfg, 'momentFreq')
+        override.disturbance.momentFreq = cfg.momentFreq;
+    end
+    override.disturbance.forcePhase = cfg.forcePhase;
+    override.disturbance.momentPhase = cfg.momentPhase;
+end
 
-    if string(cfg.disturbanceType) == "sin"
-        rng(seed, 'twister');
-        override.disturbance.forcePhase = 2*pi*rand(3,1);
-        override.disturbance.momentPhase = 2*pi*rand(3,1);
+function amp = directedAmplitude(nominalAmp, cfg, directionField)
+
+    amp = nominalAmp;
+
+    if ~isfield(cfg, directionField) || isempty(cfg.(directionField))
+        return;
+    end
+
+    direction = vector3Local(cfg.(directionField));
+    directionNorm = norm(direction);
+
+    if directionNorm < eps
+        amp = zeros(3,1);
+    else
+        amp = nominalAmp*direction/directionNorm;
+    end
+end
+
+function v = vector3Local(x)
+
+    v = x(:);
+
+    if numel(v) ~= 3
+        error("Disturbance direction must be a 3x1 vector.");
+    end
+end
+
+function [trackingErr, isFinite, message] = runBenchmarkSimulation(repoDir, override)
+
+    trackingErr = [];
+    isFinite = false;
+    message = "";
+
+    try
+        clear('main'); % reset script-local persistent states.
+        UAV_BENCHMARK_BATCH = true; %#ok<NASGU>
+        UAV_BENCHMARK_PAR_OVERRIDE = override; %#ok<NASGU>
+        run(fullfile(repoDir, 'main.m'));
+
+        trackingErr = vecnorm(log.p - log.pd, 2, 1);
+        isFinite = all(isfinite(trackingErr)) ...
+            && all(isfinite(log.T)) ...
+            && all(isfinite(log.tau(:)));
+        if ~isFinite
+            message = "Simulation produced non-finite values.";
+        end
+
+    catch ME
+        message = string(ME.message);
     end
 end
 
