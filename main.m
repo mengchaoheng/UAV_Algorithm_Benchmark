@@ -1,7 +1,6 @@
 %% main.m
 % Simple quadrotor simulation with modular reference trajectories.
 % Internal coordinate: NED, z_NED points downward.
-% 3D plots use NED axes; the display reverses z so Down is visually downward.
 %
 % State:
 %   p : position in NED
@@ -31,20 +30,31 @@ par.J = diag([0.07, 0.07, 0.12]);
 par.dt = 0.01;          % 100 Hz
 par.Tend = 12.0;
 par.trajTimeScale = 1.0;    % >1 slows the reference trajectory
+par.integratorName = "ode45";  % "ode45" or "lie_rk4"
 
 % Available choices:
 %   "figure8_horizontal"
-%   "minsnap_helix_flip"
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "helix_flip";
+par.trajName = "flip_loop_sine";
 
 % Simple controller gains
+par.controllerName = "on_manifold_mpc";  % "geometric" or "on_manifold_mpc"
 par.Kp = diag([20, 20, 25]);
 par.Kv = diag([9, 9, 10]);
 par.KR = 35*eye(3);
 par.KOmega = 35*par.J;
+
+% On-manifold finite-horizon controller.
+% State error: [p-pd; v-vd; Log(Rd'R)], input: [aT-aTd; Omega-OmegaD].
+par.mpc.N = 16; % Lu et al. use N=8; use longer horizon for the simulated rate loop.
+par.mpc.Q = diag([450, 450, 650, ...
+                  70, 70, 100, ...
+                  140, 140, 80]);
+par.mpc.R = diag([1.0, 0.55, 0.55, 0.75]);
+par.mpc.P = par.mpc.Q;
+par.mpc.omegaMax = deg2rad(800);
 
 % Actuator limits
 par.Tmax = 4*9.81;
@@ -112,7 +122,7 @@ for k = 1:N
     t = time(k);
 
     ref = traj.eval(t);
-    u = controllerPDGeometric(x, ref, par);
+    u = controller(x, ref, traj, t, par);
 
     log.p(:,k) = x.p;
     log.v(:,k) = x.v;
@@ -130,7 +140,7 @@ for k = 1:N
     log.T(k) = u.T;
     log.tau(:,k) = u.tau;
 
-    x = stepModelRigidBodyRK4(x, u, par);
+    x = stepModel(x, u, par);
 end
 
 %% ========================================================================
@@ -166,12 +176,6 @@ function traj = makeTrajectory(par)
             traj.name = "fast_circle";
             traj.Tend = par.Tend;
             traj.eval = @(t) evalFastCircle(t);
-
-        case "minsnap_helix_flip"
-            traj.name = "minsnap_helix_flip";
-            data = buildMinSnapHelixFlip();
-            traj.Tend = data.ts(end);
-            traj.eval = @(t) evalMinSnapTraj(t, data);
 
         otherwise
             error("Unknown trajectory name.");
@@ -369,88 +373,25 @@ function ref = evalFastCircle(t)
     ref.psi = atan2(ref.v(2), ref.v(1));
 end
 
-%% ========================================================================
-%% Build minimum-snap helix flip trajectory
-function data = buildMinSnapHelixFlip()
-
-    vx = 0.30;
-    Ay = 0.80;
-    Az = 0.80;
-    h0 = 1.30;
-
-    Tturn = 1.65;
-    Nturn = 6;
-    NsegPerTurn = 8;
-
-    Nseg = Nturn*NsegPerTurn;
-    Ttotal = Nturn*Tturn;
-    Om = 2*pi/Tturn;
-
-    ts = linspace(0, Ttotal, Nseg+1);
-    theta = Om*ts;
-
-    height = h0 + Az*cos(theta);
-
-    wp = [vx*ts;
-          Ay*sin(theta);
-         -height];
-
-    dStart.x = [vx, 0, 0];
-    dEnd.x   = [vx, 0, 0];
-
-    dStart.y = [ Ay*Om*cos(theta(1)), ...
-                -Ay*Om^2*sin(theta(1)), ...
-                -Ay*Om^3*cos(theta(1))];
-
-    dEnd.y   = [ Ay*Om*cos(theta(end)), ...
-                -Ay*Om^2*sin(theta(end)), ...
-                -Ay*Om^3*cos(theta(end))];
-
-    dStart.z = [ Az*Om*sin(theta(1)), ...
-                 Az*Om^2*cos(theta(1)), ...
-                -Az*Om^3*sin(theta(1))];
-
-    dEnd.z   = [ Az*Om*sin(theta(end)), ...
-                 Az*Om^2*cos(theta(end)), ...
-                -Az*Om^3*sin(theta(end))];
-
-    data.ts = ts;
-    data.cx = minSnap1D(wp(1,:), ts, dStart.x, dEnd.x);
-    data.cy = minSnap1D(wp(2,:), ts, dStart.y, dEnd.y);
-    data.cz = minSnap1D(wp(3,:), ts, dStart.z, dEnd.z);
-end
-
-%% ========================================================================
-%% Evaluate minimum-snap trajectory
-function ref = evalMinSnapTraj(t, data)
-
-    t = min(max(t, data.ts(1)), data.ts(end));
-
-    ref.p = [evalSnap1D(data.cx, data.ts, t, 0);
-             evalSnap1D(data.cy, data.ts, t, 0);
-             evalSnap1D(data.cz, data.ts, t, 0)];
-
-    ref.v = [evalSnap1D(data.cx, data.ts, t, 1);
-             evalSnap1D(data.cy, data.ts, t, 1);
-             evalSnap1D(data.cz, data.ts, t, 1)];
-
-    ref.a = [evalSnap1D(data.cx, data.ts, t, 2);
-             evalSnap1D(data.cy, data.ts, t, 2);
-             evalSnap1D(data.cz, data.ts, t, 2)];
-
-    ref.psi = 0;
-end
-
-%% ========================================================================
 %% Controller layer
+function u = controller(x, ref, traj, t, par)
+
+    switch par.controllerName
+        case "geometric"
+            u = controllerPDGeometric(x, ref, par);
+        case "on_manifold_mpc"
+            u = controllerOnManifoldMPC(x, ref, traj, t, par);
+        otherwise
+            error("Unknown controllerName.");
+    end
+end
+
 function u = controllerPDGeometric(x, ref, par)
 
     ep = ref.p - x.p;
     ev = ref.v - x.v;
 
     aCmd = ref.a + par.Kp*ep + par.Kv*ev;
-
-    
 
     [Rd, T] = desiredAttitudeFromAccel(aCmd, ref.psi, par, x.R);
 
@@ -462,6 +403,74 @@ function u = controllerPDGeometric(x, ref, par)
     u.T = min(max(T, 0), par.Tmax);
     u.tau = saturateVector(tau, par.tauMax);
     u.Rd = Rd;
+end
+
+function u = controllerOnManifoldMPC(x, ref, traj, t, par)
+
+    [Rd, aTd, OmegaD] = referenceInputOnManifold(ref, traj, t, par);
+
+    e = [x.p - ref.p;
+         x.v - ref.v;
+         LogSO3(Rd' * x.R)];
+
+    [Ad, Bd] = linearizedQuadrotorErrorModel(Rd, aTd, par);
+    K = finiteHorizonLQR(Ad, Bd, par.mpc.Q, par.mpc.R, par.mpc.P, par.mpc.N);
+
+    du = -K*e;
+    aTCmd = aTd + du(1);
+    OmegaCmd = OmegaD + du(2:4);
+
+    aTCmd = min(max(aTCmd, 0), par.Tmax/par.m);
+    OmegaCmd = saturateVector(OmegaCmd, par.mpc.omegaMax);
+
+    tau = cross(x.Omega, par.J*x.Omega) ...
+        + par.KOmega*(OmegaCmd - x.Omega);
+
+    u.T = par.m*aTCmd;
+    u.tau = saturateVector(tau, par.tauMax);
+    u.Rd = Rd;
+end
+
+function [Rd, aT, OmegaD] = referenceInputOnManifold(ref, traj, t, par)
+
+    [Rd, T] = desiredAttitudeFromAccel(ref.a, ref.psi, par, eye(3));
+    aT = T/par.m;
+
+    tNext = min(t + par.dt, par.Tend);
+    refNext = traj.eval(tNext);
+    [RdNext, ~] = desiredAttitudeFromAccel(refNext.a, refNext.psi, par, eye(3));
+
+    if tNext > t
+        OmegaD = LogSO3(Rd' * RdNext)/(tNext - t);
+    else
+        OmegaD = zeros(3,1);
+    end
+end
+
+function [Ad, Bd] = linearizedQuadrotorErrorModel(Rd, aTd, par)
+
+    Ac = zeros(9,9);
+    Bc = zeros(9,4);
+
+    Ac(1:3,4:6) = eye(3);
+    Ac(4:6,7:9) = aTd*Rd*hat(par.e3);
+
+    Bc(4:6,1) = -Rd*par.e3;
+    Bc(7:9,2:4) = eye(3);
+
+    Ad = eye(9) + par.dt*Ac;
+    Bd = par.dt*Bc;
+end
+
+function K = finiteHorizonLQR(A, B, Q, R, P, N)
+
+    K = zeros(size(B,2), size(A,1));
+
+    for k = N:-1:1
+        S = R + B'*P*B;
+        K = S\(B'*P*A);
+        P = Q + A'*P*A - A'*P*B*K;
+    end
 end
 
 %% ========================================================================
@@ -497,42 +506,84 @@ end
 
 %% ========================================================================
 %% Quadrotor model layer
-function xNext = stepModelRigidBodyRK4(x, u, par)
+function xNext = stepModel(x, u, par)
+
+    switch par.integratorName
+        case "ode45"
+            xNext = stepModelODE45(x, u, par);
+        case "lie_rk4"
+            xNext = stepModelLieRK4(x, u, par);
+        otherwise
+            error("Unknown integratorName.");
+    end
+end
+
+function xNext = stepModelODE45(x, u, par)
+
+    y0 = [x.p; x.v; reshape(x.R, 9, 1); x.Omega];
+    opts = odeset('RelTol', 1e-7, 'AbsTol', 1e-9);
+    [~, yHist] = ode45(@(t,y) quadrotorOde(t, y, u, par), [0 par.dt], y0, opts);
+
+    y = yHist(end,:)';
+    xNext.p = y(1:3);
+    xNext.v = y(4:6);
+    xNext.R = projectSO3(reshape(y(7:15), 3, 3));
+    xNext.Omega = y(16:18);
+end
+
+function yDot = quadrotorOde(~, y, u, par)
+
+    v = y(4:6);
+    R = reshape(y(7:15), 3, 3);
+    Omega = y(16:18);
+
+    [a, OmegaDot] = rigidBodyRates(R, Omega, u, par);
+
+    yDot = [v;
+            a;
+            reshape(R*hat(Omega), 9, 1);
+            OmegaDot];
+end
+
+function xNext = stepModelLieRK4(x, u, par)
 
     h = par.dt;
 
-    k1 = rigidBodyDerivative(x, u, par);
-    k2 = rigidBodyDerivative(addStateDerivative(x, k1, 0.5*h), u, par);
-    k3 = rigidBodyDerivative(addStateDerivative(x, k2, 0.5*h), u, par);
-    k4 = rigidBodyDerivative(addStateDerivative(x, k3, h), u, par);
+    Om1 = x.Omega;
+    [a1, OmDot1] = rigidBodyRates(x.R, Om1, u, par);
 
-    xNext.p = x.p + h/6*(k1.p + 2*k2.p + 2*k3.p + k4.p);
-    xNext.v = x.v + h/6*(k1.v + 2*k2.v + 2*k3.v + k4.v);
-    xNext.R = x.R + h/6*(k1.R + 2*k2.R + 2*k3.R + k4.R);
-    xNext.Omega = x.Omega + h/6*(k1.Omega + 2*k2.Omega + 2*k3.Omega + k4.Omega);
+    v2 = x.v + 0.5*h*a1;
+    R2 = x.R*expm(0.5*h*hat(Om1));
+    Om2 = x.Omega + 0.5*h*OmDot1;
+    [a2, OmDot2] = rigidBodyRates(R2, Om2, u, par);
 
-    xNext.R = projectSO3(xNext.R);
+    v3 = x.v + 0.5*h*a2;
+    R3 = x.R*expm(0.5*h*hat(Om2));
+    Om3 = x.Omega + 0.5*h*OmDot2;
+    [a3, OmDot3] = rigidBodyRates(R3, Om3, u, par);
+
+    v4 = x.v + h*a3;
+    R4 = x.R*expm(h*hat(Om3));
+    Om4 = x.Omega + h*OmDot3;
+    [a4, OmDot4] = rigidBodyRates(R4, Om4, u, par);
+
+    OmegaBar = (Om1 + 2*Om2 + 2*Om3 + Om4)/6;
+
+    xNext.p = x.p + h/6*(x.v + 2*v2 + 2*v3 + v4);
+    xNext.v = x.v + h/6*(a1 + 2*a2 + 2*a3 + a4);
+    xNext.R = x.R*expm(h*hat(OmegaBar));
+    xNext.Omega = x.Omega + h/6*(OmDot1 + 2*OmDot2 + 2*OmDot3 + OmDot4);
 end
 
-function xTmp = addStateDerivative(x, dx, h)
+function [a, OmegaDot] = rigidBodyRates(R, Omega, u, par)
 
-    xTmp.p = x.p + h*dx.p;
-    xTmp.v = x.v + h*dx.v;
-    xTmp.R = x.R + h*dx.R;
-    xTmp.Omega = x.Omega + h*dx.Omega;
-end
-
-function dx = rigidBodyDerivative(x, u, par)
-
-    dx.p = x.v;
-    dx.v = par.g*par.e3 - u.T/par.m*x.R*par.e3;
-    dx.R = x.R*hat(x.Omega);
-    dx.Omega = par.J \ (u.tau - cross(x.Omega, par.J*x.Omega));
+    a = par.g*par.e3 - u.T/par.m*R*par.e3;
+    OmegaDot = par.J \ (u.tau - cross(Omega, par.J*Omega));
 end
 
 function R = projectSO3(R)
 
-    [U,~,V] = svd(R);
+    [U, ~, V] = svd(R);
     R = U*diag([1, 1, det(U*V')])*V';
 end
 
@@ -575,7 +626,6 @@ function plotResults(time, log, par, traj)
     ylabel('y_{NED} east (m)');
     zlabel('z_{NED} down (m)');
     title("3D trajectory with sampled body axes: " + traj.name);
-    drawWorldNEDAxes(gca);
 
     legend([hActual, hRef, hx, hy, hz], ...
         {'actual trajectory','reference trajectory','x_B','y_B','z_B'}, ...
@@ -628,218 +678,37 @@ function [hx, hy, hz] = drawSampledBodyAxes(time, pLog, RLog, par)
         pNED = pLog(:,idx);
         R = RLog(:,:,idx);
 
-        pPlot = nedPointToPlot(pNED);
-
-        xB = nedVectorToPlot(R(:,1));
-        yB = nedVectorToPlot(R(:,2));
-        zB = nedVectorToPlot(R(:,3));
-
         if s == 1
-            hx = quiver3(pPlot(1), pPlot(2), pPlot(3), ...
-                    L*xB(1), L*xB(2), L*xB(3), ...
+            hx = quiver3(pNED(1), pNED(2), pNED(3), ...
+                    L*R(1,1), L*R(2,1), L*R(3,1), ...
                     0, 'r', 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
 
-            hy = quiver3(pPlot(1), pPlot(2), pPlot(3), ...
-                    L*yB(1), L*yB(2), L*yB(3), ...
+            hy = quiver3(pNED(1), pNED(2), pNED(3), ...
+                    L*R(1,2), L*R(2,2), L*R(3,2), ...
                     0, 'g', 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
 
-            hz = quiver3(pPlot(1), pPlot(2), pPlot(3), ...
-                    L*zB(1), L*zB(2), L*zB(3), ...
+            hz = quiver3(pNED(1), pNED(2), pNED(3), ...
+                    L*R(1,3), L*R(2,3), L*R(3,3), ...
                     0, 'b', 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
         else
-            quiver3(pPlot(1), pPlot(2), pPlot(3), ...
-                    L*xB(1), L*xB(2), L*xB(3), ...
+            quiver3(pNED(1), pNED(2), pNED(3), ...
+                    L*R(1,1), L*R(2,1), L*R(3,1), ...
                     0, 'r', 'LineWidth', 1.0, 'MaxHeadSize', 0.8, ...
                     'HandleVisibility','off');
 
-            quiver3(pPlot(1), pPlot(2), pPlot(3), ...
-                    L*yB(1), L*yB(2), L*yB(3), ...
+            quiver3(pNED(1), pNED(2), pNED(3), ...
+                    L*R(1,2), L*R(2,2), L*R(3,2), ...
                     0, 'g', 'LineWidth', 1.0, 'MaxHeadSize', 0.8, ...
                     'HandleVisibility','off');
 
-            quiver3(pPlot(1), pPlot(2), pPlot(3), ...
-                    L*zB(1), L*zB(2), L*zB(3), ...
+            quiver3(pNED(1), pNED(2), pNED(3), ...
+                    L*R(1,3), L*R(2,3), L*R(3,3), ...
                     0, 'b', 'LineWidth', 1.0, 'MaxHeadSize', 0.8, ...
                     'HandleVisibility','off');
         end
     end
 end
 
-function pPlot = nedPointToPlot(pNED)
-    pPlot = pNED;
-end
-
-function vPlot = nedVectorToPlot(vNED)
-    vPlot = vNED;
-end
-
-function drawWorldNEDAxes(ax)
-
-    xl = xlim(ax);
-    yl = ylim(ax);
-    zl = zlim(ax);
-
-    dx = diff(xl);
-    dy = diff(yl);
-    dz = diff(zl);
-    L = 0.14*max([dx, dy, dz]);
-
-    origin = [xl(1) + 0.08*dx;
-              yl(1) + 0.10*dy;
-              zl(1) + 0.12*dz];
-
-    quiver3(ax, origin(1), origin(2), origin(3), L, 0, 0, ...
-        0, 'Color', [0.65 0 0], 'LineWidth', 1.5, ...
-        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
-    quiver3(ax, origin(1), origin(2), origin(3), 0, L, 0, ...
-        0, 'Color', [0 0.45 0], 'LineWidth', 1.5, ...
-        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
-    quiver3(ax, origin(1), origin(2), origin(3), 0, 0, L, ...
-        0, 'Color', [0 0.15 0.75], 'LineWidth', 1.8, ...
-        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
-
-    text(ax, origin(1)+1.10*L, origin(2), origin(3), '+x_N', ...
-        'Color', [0.65 0 0], 'FontWeight', 'bold', ...
-        'HandleVisibility', 'off');
-    text(ax, origin(1), origin(2)+1.10*L, origin(3), '+y_E', ...
-        'Color', [0 0.45 0], 'FontWeight', 'bold', ...
-        'HandleVisibility', 'off');
-    text(ax, origin(1), origin(2), origin(3)+1.10*L, '+z_D', ...
-        'Color', [0 0.15 0.75], 'FontWeight', 'bold', ...
-        'HandleVisibility', 'off');
-
-    xlim(ax, xl);
-    ylim(ax, yl);
-    zlim(ax, zl);
-end
-
-%% ========================================================================
-%% Minimum-snap utility functions
-function c = minSnap1D(wp, ts, dStart, dEnd)
-% Equality-constrained minimum snap for one scalar trajectory.
-% Polynomial on each segment: w_j(tau)=c0+c1*tau+...+c7*tau^7.
-
-    n = 7;
-    nCoef = n + 1;
-    m = numel(ts) - 1;
-    nVar = m*nCoef;
-
-    H = zeros(nVar);
-
-    for s = 1:m
-        T = ts(s+1) - ts(s);
-        Q = zeros(nCoef);
-
-        for i = 4:n
-            for j = 4:n
-                Q(i+1,j+1) = factorial(i)/factorial(i-4) ...
-                            * factorial(j)/factorial(j-4) ...
-                            * T^(i+j-7)/(i+j-7);
-            end
-        end
-
-        idx = segIndex(s, nCoef);
-        H(idx,idx) = Q;
-    end
-
-    H = H + 1e-10*eye(nVar);
-
-    Aeq = [];
-    beq = [];
-
-    % Position constraints at each segment boundary.
-    for s = 1:m
-        T = ts(s+1) - ts(s);
-
-        row = zeros(1,nVar);
-        row(segIndex(s,nCoef)) = polyBasis(n,0,0);
-        Aeq = [Aeq; row];
-        beq = [beq; wp(s)];
-
-        row = zeros(1,nVar);
-        row(segIndex(s,nCoef)) = polyBasis(n,0,T);
-        Aeq = [Aeq; row];
-        beq = [beq; wp(s+1)];
-    end
-
-    % Start derivative constraints: velocity, acceleration, jerk.
-    for d = 1:3
-        row = zeros(1,nVar);
-        row(segIndex(1,nCoef)) = polyBasis(n,d,0);
-        Aeq = [Aeq; row];
-        beq = [beq; dStart(d)];
-    end
-
-    % End derivative constraints: velocity, acceleration, jerk.
-    Tend = ts(end) - ts(end-1);
-
-    for d = 1:3
-        row = zeros(1,nVar);
-        row(segIndex(m,nCoef)) = polyBasis(n,d,Tend);
-        Aeq = [Aeq; row];
-        beq = [beq; dEnd(d)];
-    end
-
-    % Interior continuity constraints: velocity, acceleration, jerk.
-    for s = 1:m-1
-        T = ts(s+1) - ts(s);
-
-        for d = 1:3
-            row = zeros(1,nVar);
-            row(segIndex(s,nCoef)) = polyBasis(n,d,T);
-            row(segIndex(s+1,nCoef)) = -polyBasis(n,d,0);
-            Aeq = [Aeq; row];
-            beq = [beq; 0];
-        end
-    end
-
-    KKT = [H, Aeq'; Aeq, zeros(size(Aeq,1))];
-    rhs = [zeros(nVar,1); beq];
-
-    sol = KKT \ rhs;
-    c = reshape(sol(1:nVar), nCoef, m);
-end
-
-function val = evalSnap1D(c, ts, tq, der)
-% Evaluate derivative order der of a piecewise polynomial.
-
-    n = size(c,1) - 1;
-    m = size(c,2);
-
-    if tq <= ts(1)
-        s = 1;
-        tau = 0;
-    elseif tq >= ts(end)
-        s = m;
-        tau = ts(end) - ts(end-1);
-    else
-        s = find(ts <= tq, 1, 'last');
-
-        if s == numel(ts)
-            s = numel(ts)-1;
-        end
-
-        tau = tq - ts(s);
-    end
-
-    val = polyBasis(n, der, tau) * c(:,s);
-end
-
-function b = polyBasis(n, der, tau)
-% Row vector for derivative der of [1,t,t^2,...,t^n].
-
-    b = zeros(1,n+1);
-
-    for i = der:n
-        b(i+1) = factorial(i)/factorial(i-der)*tau^(i-der);
-    end
-end
-
-function idx = segIndex(s, nCoef)
-    idx = (s-1)*nCoef + (1:nCoef);
-end
-
-%% ========================================================================
 %% SO(3) utility functions
 function S = hat(w)
 
