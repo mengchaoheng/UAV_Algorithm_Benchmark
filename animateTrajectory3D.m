@@ -24,11 +24,13 @@ function animateTrajectory3D(time, log, par, traj)
 
     grid(ax, 'on');
     axis(ax, 'equal');
-    xlabel(ax, 'x (m)');
-    ylabel(ax, 'y (m)');
-    zlabel(ax, 'height = -z_{NED} (m)');
     view(ax, 35, 25);
+    set(ax, 'ZDir', 'reverse');
+    xlabel(ax, 'x_{NED} north (m)');
+    ylabel(ax, 'y_{NED} east (m)');
+    zlabel(ax, 'z_{NED} down (m)');
     setLimits(ax, [p, pd]);
+    drawWorldNEDAxes(ax);
     title(ax, "3D trajectory animation: " + traj.name);
     legend(ax, [hPath, hP, hPd, hPoint, hx, hy, hz], ...
         {'reference path','actual','reference','vehicle','x_B','y_B','z_B'}, ...
@@ -59,7 +61,7 @@ function animateTrajectory3D(time, log, par, traj)
 end
 
 function pPlot = nedToPlot(pNED)
-    pPlot = [pNED(1,:); pNED(2,:); -pNED(3,:)];
+    pPlot = pNED;
 end
 
 function [poseP, poseR] = selectPoseLog(log, poseSource)
@@ -91,4 +93,43 @@ function setLimits(ax, pAll)
     xlim(ax, [min(pAll(1,:))-margin, max(pAll(1,:))+margin]);
     ylim(ax, [min(pAll(2,:))-margin, max(pAll(2,:))+margin]);
     zlim(ax, [min(pAll(3,:))-margin, max(pAll(3,:))+margin]);
+end
+
+function drawWorldNEDAxes(ax)
+    xl = xlim(ax);
+    yl = ylim(ax);
+    zl = zlim(ax);
+
+    dx = diff(xl);
+    dy = diff(yl);
+    dz = diff(zl);
+    L = 0.14*max([dx, dy, dz]);
+
+    origin = [xl(1) + 0.08*dx;
+              yl(1) + 0.10*dy;
+              zl(1) + 0.12*dz];
+
+    quiver3(ax, origin(1), origin(2), origin(3), L, 0, 0, ...
+        0, 'Color', [0.65 0 0], 'LineWidth', 1.5, ...
+        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
+    quiver3(ax, origin(1), origin(2), origin(3), 0, L, 0, ...
+        0, 'Color', [0 0.45 0], 'LineWidth', 1.5, ...
+        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
+    quiver3(ax, origin(1), origin(2), origin(3), 0, 0, L, ...
+        0, 'Color', [0 0.15 0.75], 'LineWidth', 1.8, ...
+        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
+
+    text(ax, origin(1)+1.10*L, origin(2), origin(3), '+x_N', ...
+        'Color', [0.65 0 0], 'FontWeight', 'bold', ...
+        'HandleVisibility', 'off');
+    text(ax, origin(1), origin(2)+1.10*L, origin(3), '+y_E', ...
+        'Color', [0 0.45 0], 'FontWeight', 'bold', ...
+        'HandleVisibility', 'off');
+    text(ax, origin(1), origin(2), origin(3)+1.10*L, '+z_D', ...
+        'Color', [0 0.15 0.75], 'FontWeight', 'bold', ...
+        'HandleVisibility', 'off');
+
+    xlim(ax, xl);
+    ylim(ax, yl);
+    zlim(ax, zl);
 end

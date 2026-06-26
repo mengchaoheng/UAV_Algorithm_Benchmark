@@ -1,7 +1,7 @@
 %% main.m
 % Simple quadrotor simulation with modular reference trajectories.
 % Internal coordinate: NED, z_NED points downward.
-% 3D plot coordinate: height = -z_NED.
+% 3D plots use NED axes; the display reverses z so Down is visually downward.
 %
 % State:
 %   p : position in NED
@@ -38,7 +38,7 @@ par.trajTimeScale = 1.0;    % >1 slows the reference trajectory
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "minsnap_helix_flip";
+par.trajName = "helix_flip";
 
 % Simple controller gains
 par.Kp = diag([20, 20, 25]);
@@ -238,23 +238,41 @@ function ref = evalHelixFlip(t)
     vx = 0.30;
     Ay = 0.80;
     Az = 0.80;
-    h0 = 1.30;
+    hHover = 1.30;
+    hCenter = hHover + Az;
     Tturn = 1.65;
+    tHover = 1.0;
+    tRamp = 1.50;
     Om = 2*pi/Tturn;
 
-    h = h0 + Az*cos(Om*t);
+    if t <= tHover
+        ref.p = [0; 0; -hHover];
+        ref.v = [0; 0; 0];
+        ref.a = [0; 0; 0];
+        ref.psi = 0;
+        return;
+    end
 
-    ref.p = [vx*t;
-             Ay*sin(Om*t);
+    tau = t - tHover;
+    [q, qDot, qDDot] = rampedTime(tau, tRamp);
+
+    theta = pi + Om*q;
+    thetaDot = Om*qDot;
+    thetaDDot = Om*qDDot;
+
+    h = hCenter + Az*cos(theta);
+
+    ref.p = [vx*q;
+             Ay*sin(theta);
             -h];
 
-    ref.v = [vx;
-             Ay*Om*cos(Om*t);
-             Az*Om*sin(Om*t)];
+    ref.v = [vx*qDot;
+             Ay*cos(theta)*thetaDot;
+             Az*sin(theta)*thetaDot];
 
-    ref.a = [0;
-            -Ay*Om^2*sin(Om*t);
-             Az*Om^2*cos(Om*t)];
+    ref.a = [vx*qDDot;
+             Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
+             Az*(cos(theta)*thetaDot^2 + sin(theta)*thetaDDot)];
 
     ref.psi = 0;
 end
@@ -265,25 +283,66 @@ function ref = evalFlipLoopSine(t)
 
     Ay = 1.0;
     Az = 1.5;
-    h0 = 1.5;
+    hHover = 1.5;
+    hCenter = hHover + Az;
     Tloop = 1.90;
+    tHover = 1.0;
+    tRamp = 1.50;
     Om = 2*pi/Tloop;
 
-    h = h0 + Az*cos(Om*t);
+    if t <= tHover
+        ref.p = [0; 0; -hHover];
+        ref.v = [0; 0; 0];
+        ref.a = [0; 0; 0];
+        ref.psi = 0;
+        return;
+    end
+
+    tau = t - tHover;
+    [q, qDot, qDDot] = rampedTime(tau, tRamp);
+
+    theta = pi + Om*q;
+    thetaDot = Om*qDot;
+    thetaDDot = Om*qDDot;
+
+    h = hCenter + Az*cos(theta);
 
     ref.p = [0;
-             Ay*sin(Om*t);
+             Ay*sin(theta);
             -h];
 
     ref.v = [0;
-             Ay*Om*cos(Om*t);
-             Az*Om*sin(Om*t)];
+             Ay*cos(theta)*thetaDot;
+             Az*sin(theta)*thetaDot];
 
     ref.a = [0;
-            -Ay*Om^2*sin(Om*t);
-             Az*Om^2*cos(Om*t)];
+             Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
+             Az*(cos(theta)*thetaDot^2 + sin(theta)*thetaDDot)];
 
     ref.psi = 0;
+end
+
+function [q, qDot, qDDot] = rampedTime(t, tRamp)
+
+    if t <= 0
+        q = 0;
+        qDot = 0;
+        qDDot = 0;
+        return;
+    end
+
+    if t >= tRamp
+        q = t - 0.5*tRamp;
+        qDot = 1;
+        qDDot = 0;
+        return;
+    end
+
+    s = t/tRamp;
+
+    q = 0.5*t - 0.5*tRamp/pi*sin(pi*s);
+    qDot = 0.5*(1 - cos(pi*s));
+    qDDot = 0.5*pi/tRamp*sin(pi*s);
 end
 
 %% ========================================================================
@@ -386,20 +445,19 @@ end
 %% Controller layer
 function u = controllerPDGeometric(x, ref, par)
 
-    ep = x.p - ref.p;
-    ev = x.v - ref.v;
+    ep = ref.p - x.p;
+    ev = ref.v - x.v;
 
-    aCmd = ref.a - par.Kp*ep - par.Kv*ev;
+    aCmd = ref.a + par.Kp*ep + par.Kv*ev;
 
-    [Rd, ~] = desiredAttitudeFromAccel(aCmd, ref.psi, par);
+    
+
+    [Rd, T] = desiredAttitudeFromAccel(aCmd, ref.psi, par, x.R);
 
     rErr = LogSO3(x.R' * Rd);
 
     tau = cross(x.Omega, par.J*x.Omega) ...
-        + par.KR*rErr - par.KOmega*x.Omega;
-
-    c = par.g*par.e3 - aCmd;
-    T = par.m*dot(c, x.R*par.e3);
+        + par.KR*rErr + par.KOmega*(zeros(3,1)-x.Omega);
 
     u.T = min(max(T, 0), par.Tmax);
     u.tau = saturateVector(tau, par.tauMax);
@@ -408,17 +466,19 @@ end
 
 %% ========================================================================
 %% Flatness attitude map layer
-function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par)
+function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par, RCurrent)
 
-    c = par.g*par.e3 - aCmd;
-    T = par.m*norm(c);
+    T_b_z = -par.m*(aCmd - par.g*par.e3); % -f_d. desired force along body z_B
 
-    if T < 1e-9
-        c = par.g*par.e3;
-        T = par.m*norm(c);
+    if norm(T_b_z) < 1e-9
+        T_b_z = par.m*par.g*par.e3;
     end
 
-    b3d = c/norm(c);
+    % T = dot(T_b_z, RCurrent*par.e3); % option 1: current-attitude projection
+    T = norm(T_b_z);                 % option 2: desired-force magnitude
+
+
+    b3d = T_b_z/norm(T_b_z);
 
     headingAxis = [cos(psi); sin(psi); 0];
 
@@ -487,11 +547,11 @@ function plotResults(time, log, par, traj)
 
     figure('Name','3D trajectory with sampled attitude');
 
-    hActual = plot3(log.p(1,:), log.p(2,:), -log.p(3,:), ...
+    hActual = plot3(log.p(1,:), log.p(2,:), log.p(3,:), ...
         'LineWidth', 1.6); 
     hold on;
 
-    hRef = plot3(log.pd(1,:), log.pd(2,:), -log.pd(3,:), ...
+    hRef = plot3(log.pd(1,:), log.pd(2,:), log.pd(3,:), ...
         '--', 'LineWidth', 1.6);
 
     switch par.poseSource
@@ -509,11 +569,13 @@ function plotResults(time, log, par, traj)
     [hx, hy, hz] = drawSampledBodyAxes(time, poseP, poseR, par);
 
     grid on; axis equal;
-    xlabel('x (m)');
-    ylabel('y (m)');
-    zlabel('height = -z_{NED} (m)');
-    title("3D trajectory with sampled body axes: " + traj.name);
     view(35, 25);
+    set(gca, 'ZDir', 'reverse');
+    xlabel('x_{NED} north (m)');
+    ylabel('y_{NED} east (m)');
+    zlabel('z_{NED} down (m)');
+    title("3D trajectory with sampled body axes: " + traj.name);
+    drawWorldNEDAxes(gca);
 
     legend([hActual, hRef, hx, hy, hz], ...
         {'actual trajectory','reference trajectory','x_B','y_B','z_B'}, ...
@@ -604,11 +666,51 @@ function [hx, hy, hz] = drawSampledBodyAxes(time, pLog, RLog, par)
 end
 
 function pPlot = nedPointToPlot(pNED)
-    pPlot = [pNED(1); pNED(2); -pNED(3)];
+    pPlot = pNED;
 end
 
 function vPlot = nedVectorToPlot(vNED)
-    vPlot = [vNED(1); vNED(2); -vNED(3)];
+    vPlot = vNED;
+end
+
+function drawWorldNEDAxes(ax)
+
+    xl = xlim(ax);
+    yl = ylim(ax);
+    zl = zlim(ax);
+
+    dx = diff(xl);
+    dy = diff(yl);
+    dz = diff(zl);
+    L = 0.14*max([dx, dy, dz]);
+
+    origin = [xl(1) + 0.08*dx;
+              yl(1) + 0.10*dy;
+              zl(1) + 0.12*dz];
+
+    quiver3(ax, origin(1), origin(2), origin(3), L, 0, 0, ...
+        0, 'Color', [0.65 0 0], 'LineWidth', 1.5, ...
+        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
+    quiver3(ax, origin(1), origin(2), origin(3), 0, L, 0, ...
+        0, 'Color', [0 0.45 0], 'LineWidth', 1.5, ...
+        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
+    quiver3(ax, origin(1), origin(2), origin(3), 0, 0, L, ...
+        0, 'Color', [0 0.15 0.75], 'LineWidth', 1.8, ...
+        'MaxHeadSize', 0.8, 'HandleVisibility', 'off');
+
+    text(ax, origin(1)+1.10*L, origin(2), origin(3), '+x_N', ...
+        'Color', [0.65 0 0], 'FontWeight', 'bold', ...
+        'HandleVisibility', 'off');
+    text(ax, origin(1), origin(2)+1.10*L, origin(3), '+y_E', ...
+        'Color', [0 0.45 0], 'FontWeight', 'bold', ...
+        'HandleVisibility', 'off');
+    text(ax, origin(1), origin(2), origin(3)+1.10*L, '+z_D', ...
+        'Color', [0 0.15 0.75], 'FontWeight', 'bold', ...
+        'HandleVisibility', 'off');
+
+    xlim(ax, xl);
+    ylim(ax, yl);
+    zlim(ax, zl);
 end
 
 %% ========================================================================
