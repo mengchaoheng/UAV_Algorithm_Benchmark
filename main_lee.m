@@ -9,7 +9,7 @@
 %   Omega : body angular velocity expressed in body frame
 %
 % Input after control allocation:
-%   actuator : four bounded Iris thrust actuator commands [0,1]
+%   actuator : Lee uses rotor thrusts [N]; PX4 uses normalized commands [0,1].
 %
 % Reference interface:
 %   ref.p   position
@@ -34,11 +34,25 @@ end
 
 %% ========================================================================
 %% 0. Parameters
+% Iris Gazebo Classic plant, actuator, and geometry parameters, matching
+% iris.m and gazebo_iris_model.m.
 par.g = 9.81;
 par.e3 = [0;0;1];
 % Sun et al. 2022 Table II mass and inertia.
 par.m = 0.75;
 par.J = diag([2.5, 2.1, 4.3])*1e-3;
+par.ct = 1.51e-6;                 % motorConstant [N/(rad/s)^2]
+par.cq = 2.37e-8;                 % momentConstant coefficient
+par.kappa = par.cq/par.ct;        % yaw moment / thrust [m]
+par.omegaMax = 2.3726e3;          % max rotor speed [rad/s]
+par.CT = 8.5;                     % max thrust per normalized actuator [N]
+par.pos = [ ...
+     0.13,  0.22, -0.023;
+    -0.13, -0.20, -0.023;
+     0.13, -0.22, -0.023;
+    -0.13,  0.20, -0.023];
+par.axis = [0; 0; -1];
+par.spin = [1; 1; -1; -1];
 
 par.dt = 0.01;          % 100 Hz
 par.Tend = 16.0;
@@ -56,7 +70,7 @@ par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the si
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "flip_loop_sine";
+par.trajName = "helix_flip";
 
 % One knob for all trajectory shapes. The factory below converts it into
 % periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
@@ -106,19 +120,14 @@ par.px4iris.rateIntLimit = [0.3; 0.3; 0.3];
 par.px4iris.useAccelerationFeedforward = true;
 par.px4iris.useAttitudeRateFeedforward = true;
 
-% Simplified Iris Gazebo Classic actuator model in PX4 effectiveness order:
-%   BPX4 = [Mx; My; Mz; Fx; Fy; Fz].
-% Initialization below derives the two matrices used by this model:
-%   B     = [Fz; Mx; My; Mz]
-%   BNorm = normalized [Fz; Mx; My; Mz].
-par.allocation.BPX4 = [-1.8700,  1.7000,  1.8700, -1.7000;
-                        1.1050, -1.1050,  1.1050, -1.1050;
-                        0.1334106,  0.1334106, -0.1334106, -0.1334106;
-                        0.0, 0.0, 0.0, 0.0;
-                        0.0, 0.0, 0.0, 0.0;
-                       -8.5000, -8.5000, -8.5000, -8.5000];
+% Iris allocation matrices are generated below:
+%   B        maps rotor thrusts [N] to [Fz; Mx; My; Mz] for Lee.
+%   B_px4    maps normalized PX4 actuator commands to physical wrench.
+%   B_px4_norm is the PX4-normalized control effectiveness matrix.
 par.allocation.uMin = zeros(4,1);
-par.allocation.uMax = ones(4,1);
+par.allocation.uMax = par.CT*ones(4,1);
+par.allocation.uNormMin = zeros(4,1);
+par.allocation.uNormMax = ones(4,1);
 
 % Additive plant disturbances. The force disturbance is expressed in inertial
 % NED coordinates [N]; the moment disturbance is expressed in the body frame
@@ -126,8 +135,8 @@ par.allocation.uMax = ones(4,1);
 % The default is disabled, so normal single-run behavior is unchanged.
 par.disturbance.enabled = false;
 par.disturbance.type = "none";       % "none", "constant", or "sin"
-par.disturbance.forceAmp = 0;        % scalar or 3x1 per-axis amplitude [N]
-par.disturbance.momentAmp = 0;       % scalar or 3x1 per-axis amplitude [N*m]
+par.disturbance.forceAmp = zeros(3,1);   % per-axis amplitude [N]
+par.disturbance.momentAmp = zeros(3,1);  % per-axis amplitude [N*m]
 par.disturbance.forceFreq = [0.31; 0.47; 0.61];   % sinusoid frequencies [Hz]
 par.disturbance.momentFreq = [0.43; 0.59; 0.73];  % sinusoid frequencies [Hz]
 par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
@@ -149,22 +158,13 @@ par.enableAnimation = true;
 par.animationSpeed = 1;       % 1.0 = real time
 par.animationFrameDt = 0.02;    % seconds
 
-if ~isempty(fieldnames(parOverride__))
-    par = mergeStructRecursive(par, parOverride__);
-end
+par = mergeStructRecursive(par, parOverride__);
 
-if size(par.allocation.BPX4, 1) ~= 6
-    error("par.allocation.BPX4 must be PX4 ordered [Mx;My;Mz;Fx;Fy;Fz].");
-end
-par.allocation.uMin = par.allocation.uMin(:);
-par.allocation.uMax = par.allocation.uMax(:);
-par = prepareNormalizedAllocation(par);
+[par.allocation.B, par.allocation.B_px4, par.allocation.B_px4_norm] = ...
+    irisAllocationMatrices(par);
+
 par.Tmax = allocationForceLimit(par);
 par.tauMax = allocationMomentLimits(par);
-
-if ~isfinite(par.px4iris.hoverThrust)
-    par.px4iris.hoverThrust = hoverThrustFromNormalizedAllocation(par);
-end
 
 %% ========================================================================
 %% 1. Build trajectory
@@ -243,16 +243,10 @@ for k = 1:N
     log.T(k) = muApplied(1);
     log.tau(:,k) = muApplied(2:4);
     log.actuator(:,k) = u.actuator;
-    if isfield(u, 'thrSp')
+    if par.controllerName == "px4_iris"
         log.thrSp(:,k) = u.thrSp;
-    end
-    if isfield(u, 'ratesSp')
         log.ratesSp(:,k) = u.ratesSp;
-    end
-    if isfield(u, 'rateError')
         log.rateError(:,k) = u.rateError;
-    end
-    if isfield(u, 'torqueNorm')
         log.torqueNorm(:,k) = u.torqueNorm;
     end
     [log.forceDist(:,k), log.momentDist(:,k)] = disturbanceAtTime(t, par);
@@ -313,9 +307,6 @@ function traj = makeTrajectory(par)
             traj.Tend = par.Tend;
             cfg = makeFastCircleParams(shape);
             traj.eval = @(t) evalFastCircle(t, cfg);
-
-        otherwise
-            error("Unknown trajectory name.");
     end
 
     traj = applyTrajectoryProgress(traj, par);
@@ -330,13 +321,9 @@ function traj = applyTrajectoryProgress(traj, par)
         case "scale_fixed"
             scale = par.progress.scale;
 
-            if scale <= 0
-                error("Trajectory time scale must be positive.");
-            end
-
             traj.Tend = scale*baseTend;
             traj.eval = @(t) evalProgressTrajectory( ...
-                baseEval, t/scale, 1/scale, 0, 0, 0, baseTend);
+                baseEval, t/scale, 1/scale, 0, 0, 0, baseTend, false);
             traj.evalPredict = @(t) evalProgressTrajectory( ...
                 baseEval, t/scale, 1/scale, 0, 0, 0, baseTend, true);
 
@@ -347,29 +334,18 @@ function traj = applyTrajectoryProgress(traj, par)
         case "scale_range"
             scaleRange = par.progress.scaleRange;
 
-            if any(scaleRange <= 0)
-                error("Trajectory time scale must be positive.");
-            end
-
             traj.Tend = par.Tend;
             traj.name = traj.name + "_scaleRange_" + string(scaleRange(1)) ...
                       + "_" + string(scaleRange(2));
             traj.eval = @(t) evalScaleRangeTrajectory( ...
-                baseEval, baseTend, t, traj.Tend, scaleRange);
+                baseEval, baseTend, t, traj.Tend, scaleRange, false);
             traj.evalPredict = @(t) evalScaleRangeTrajectory( ...
                 baseEval, baseTend, t, traj.Tend, scaleRange, true);
-
-        otherwise
-            error("Unknown progress mode.");
     end
 end
 
 function ref = evalScaleRangeTrajectory( ...
         baseEval, baseTend, t, simTend, scaleRange, allowPredict)
-
-    if nargin < 6
-        allowPredict = false;
-    end
 
     scale0 = scaleRange(1);
     scale1 = scaleRange(2);
@@ -382,10 +358,6 @@ function ref = evalScaleRangeTrajectory( ...
         alpha = clampScalar(t/simTend, 0, 1);
         tClip = alpha*simTend;
         scale = scale0 + scaleDot*tClip;
-    end
-
-    if scale <= 0
-        error("Trajectory time scale became non-positive.");
     end
 
     % The scale is instantaneous: ds/dt = 1/scale(t).
@@ -417,10 +389,6 @@ function ref = evalProgressTrajectory( ...
         baseEval, s, sDot, sDDot, sDDDot, sDDDDot, ...
         baseTend, allowPredict)
 
-    if nargin < 8
-        allowPredict = false;
-    end
-
     if allowPredict
         s = max(s, 0);
     else
@@ -428,7 +396,6 @@ function ref = evalProgressTrajectory( ...
     end
 
     ref = baseEval(s);
-    ref = completeReferenceDerivatives(ref);
 
     vBase = ref.v;
     aBase = ref.a;
@@ -464,32 +431,18 @@ function scale = trajectoryScaleAtFraction(par, fraction)
 
     fraction = clampScalar(fraction, 0, 1);
 
-    if ~isfield(par, 'progress') || ~isfield(par.progress, 'mode')
-        scale = 1;
-        return;
-    end
-
     switch string(par.progress.mode)
         case "scale_range"
             scaleRange = par.progress.scaleRange;
             scale = scaleRange(1) + (scaleRange(2) - scaleRange(1))*fraction;
         case "scale_fixed"
             scale = par.progress.scale;
-        otherwise
-            scale = 1;
     end
-
-    scale = max(scale, eps);
 end
 
 function s = trajectoryBaseTimeAtFraction(par, fraction)
 
     fraction = clampScalar(fraction, 0, 1);
-
-    if ~isfield(par, 'progress') || ~isfield(par.progress, 'mode')
-        s = fraction*par.Tend;
-        return;
-    end
 
     switch string(par.progress.mode)
         case "scale_range"
@@ -506,22 +459,19 @@ function s = trajectoryBaseTimeAtFraction(par, fraction)
 
         case "scale_fixed"
             s = fraction*par.Tend/par.progress.scale;
-
-        otherwise
-            s = fraction*par.Tend;
     end
 end
 
 function shape = trajectoryShape(par)
 
-    intensity = clampScalar(getStructField(par, 'trajIntensity', 0.75), 0, 1);
+    intensity = clampScalar(par.trajIntensity, 0, 1);
     scaleHalf = trajectoryScaleAtFraction(par, 0.5);
     scaleEnd = trajectoryScaleAtFraction(par, 1.0);
     sHalf = trajectoryBaseTimeAtFraction(par, 0.5);
     sEnd = trajectoryBaseTimeAtFraction(par, 1.0);
-    flipTurns = max(double(getStructField(par, 'flipTurns', 3)), 0.5);
+    flipTurns = max(double(par.flipTurns), 0.5);
 
-    thrustAccel = max(par.Tmax/max(par.m, eps) - par.g, 0.5*par.g);
+    thrustAccel = max(par.Tmax/par.m - par.g, 0.5*par.g);
     alphaMax = angularAccelLimit(par);
 
     shape.g = par.g;
@@ -533,7 +483,7 @@ function shape = trajectoryShape(par)
     rearFlipMin = (1.02 + 0.10*intensity)*par.g*scaleEnd^2;
     rearFlipTarget = (1.08 + 0.35*intensity ...
                     + 0.80*max(flipTurns - 1, 0))*par.g*scaleEnd^2;
-    thrustFlipMax = ((0.70 + 0.18*intensity)*par.Tmax/max(par.m, eps) ...
+    thrustFlipMax = ((0.70 + 0.18*intensity)*par.Tmax/par.m ...
                    - par.g)*scaleEnd^2;
     flipCap = min([frontFlipMax, rearFlipTarget, thrustFlipMax]);
     shape.flipAccel = min(frontFlipMax, max(rearFlipMin, flipCap));
@@ -541,32 +491,16 @@ function shape = trajectoryShape(par)
     shape.loopOmega = clampScalar((0.22 + 0.08*intensity)*sqrt(alphaMax), ...
         1.80, 3.00);
     shape.rampTime = clampScalar(0.5*pi*shape.loopOmega ...
-        / max((0.12 + 0.08*intensity)*alphaMax, eps), 1.80, 3.20);
+        / ((0.12 + 0.08*intensity)*alphaMax), 1.80, 3.20);
     shape.flipTurns = flipTurns;
-    shape.flipSpan = max(sEnd - sHalf, eps);
+    shape.flipSpan = sEnd - sHalf;
 end
 
 function alphaMax = angularAccelLimit(par)
 
     Jdiag = abs(diag(par.J));
     tauMax = abs(par.tauMax(:));
-    n = min(numel(Jdiag), numel(tauMax));
-
-    if n == 0
-        alphaMax = 80;
-        return;
-    end
-
-    alpha = tauMax(1:n)./max(Jdiag(1:n), eps);
-    alpha = alpha(isfinite(alpha) & alpha > 0);
-
-    if isempty(alpha)
-        alphaMax = 80;
-    else
-        alphaMax = min(alpha);
-    end
-
-    alphaMax = max(alphaMax, eps);
+    alphaMax = min(tauMax./Jdiag);
 end
 
 function dst = mergeStructRecursive(dst, src)
@@ -610,27 +544,39 @@ function Tmax = allocationForceLimit(par)
     Tmax = sum(max(row.*lb, row.*ub));
 end
 
-function par = prepareNormalizedAllocation(par)
+function [B, B_px4, B_px4_norm] = irisAllocationMatrices(par)
 
-    Bpx4 = par.allocation.BPX4;
-    [~, BnormPX4] = px4_normalize_B(Bpx4, true);
+    % This is the control-allocation construction from iris.m, kept local so
+    % main_lee.m derives Lee and PX4 matrices from the same Gazebo Iris model.
+    CT = par.CT;
+    kappa = par.kappa;
+    pos = par.pos;
+    axis = par.axis;
+    KM = kappa*par.spin(:);
 
-    par.allocation.B = [Bpx4(6,:); Bpx4(1:3,:)];
-    par.allocation.BNorm = [BnormPX4(6,:); BnormPX4(1:3,:)];
-end
+    B2 = zeros(6,4);
 
-function hoverThrust = hoverThrustFromNormalizedAllocation(par)
-
-    unitHoverCmd = [-1; 0; 0; 0];
-    actuatorPerUnitThrust = par.allocation.BNorm \ unitHoverCmd;
-    physicalWrenchPerUnitThrust = par.allocation.B * actuatorPerUnitThrust;
-    totalThrustPerUnitCommand = -physicalWrenchPerUnitThrust(1);
-
-    if totalThrustPerUnitCommand <= eps
-        error("Normalized allocation cannot produce positive vertical thrust.");
+    for i = 1:4
+        r = pos(i,:)';
+        moment = cross(r, axis) - KM(i)*axis;
+        force = axis;
+        B2(:,i) = [moment; force];
     end
 
-    hoverThrust = par.m * par.g / totalThrustPerUnitCommand;
+    B3 = zeros(6,4);
+
+    for i = 1:4
+        r = pos(i,:)';
+        moment = CT*cross(r, axis) - CT*KM(i)*axis;
+        force = CT*axis;
+        B3(:,i) = [moment; force];
+    end
+
+    [~, B3_norm] = px4_normalize_B(B3, true);
+
+    B = [B2(6,:); B2(1:3,:)];
+    B_px4 = [B3(6,:); B3(1:3,:)];
+    B_px4_norm = [B3_norm(6,:); B3_norm(1:3,:)];
 end
 
 function [forceDist, momentDist] = disturbanceAtTime(t, par)
@@ -638,21 +584,21 @@ function [forceDist, momentDist] = disturbanceAtTime(t, par)
     forceDist = zeros(3,1);
     momentDist = zeros(3,1);
 
-    if ~isfield(par, 'disturbance') || ~par.disturbance.enabled
+    if ~par.disturbance.enabled
         return;
     end
 
     d = par.disturbance;
-    distType = string(getStructField(d, 'type', "none"));
+    distType = string(d.type);
 
-    startTime = double(getStructField(d, 'startTime', 0));
-    endTime = double(getStructField(d, 'endTime', inf));
+    startTime = double(d.startTime);
+    endTime = double(d.endTime);
     if t < startTime || t > endTime
         return;
     end
 
-    forceAmp = vector3(getStructField(d, 'forceAmp', 0));
-    momentAmp = vector3(getStructField(d, 'momentAmp', 0));
+    forceAmp = d.forceAmp;
+    momentAmp = d.momentAmp;
 
     switch distType
         case "constant"
@@ -660,60 +606,16 @@ function [forceDist, momentDist] = disturbanceAtTime(t, par)
             momentDist = momentAmp;
 
         case "sin"
-            forceFreq = vector3(getStructField(d, 'forceFreq', [0.31; 0.47; 0.61]));
-            momentFreq = vector3(getStructField(d, 'momentFreq', [0.43; 0.59; 0.73]));
-            forcePhase = vector3(getStructField(d, 'forcePhase', zeros(3,1)));
-            momentPhase = vector3(getStructField(d, 'momentPhase', zeros(3,1)));
+            forceFreq = d.forceFreq;
+            momentFreq = d.momentFreq;
+            forcePhase = d.forcePhase;
+            momentPhase = d.momentPhase;
 
             forceDist = forceAmp .* sin(2*pi*forceFreq*t + forcePhase);
             momentDist = momentAmp .* sin(2*pi*momentFreq*t + momentPhase);
 
         case "none"
             return;
-
-        otherwise
-            error("Unknown disturbance type.");
-    end
-end
-
-function value = getStructField(s, name, defaultValue)
-
-    if isfield(s, name)
-        value = s.(name);
-    else
-        value = defaultValue;
-    end
-end
-
-function v = vector3(x)
-
-    if isscalar(x)
-        v = repmat(x, 3, 1);
-    else
-        v = x(:);
-    end
-
-    if numel(v) ~= 3
-        error("Value must be scalar or 3x1.");
-    end
-end
-
-function ref = completeReferenceDerivatives(ref)
-
-    if ~isfield(ref, 'j')
-        ref.j = zeros(3,1);
-    end
-
-    if ~isfield(ref, 's')
-        ref.s = zeros(3,1);
-    end
-
-    if ~isfield(ref, 'psiDot')
-        ref.psiDot = 0;
-    end
-
-    if ~isfield(ref, 'psiDDot')
-        ref.psiDDot = 0;
     end
 end
 
@@ -801,9 +703,6 @@ function [y, yd, ydd, y3, y4] = trigDerivatives( ...
             y4 = amplitude*(c*thetaDot^4 + 6*s*thetaDot^2*thetaDDot ...
                 - 3*c*thetaDDot^2 - 4*c*thetaDot*theta3 ...
                 - s*theta4);
-
-        otherwise
-            error("Unknown trigonometric derivative kind.");
     end
 end
 
@@ -997,9 +896,6 @@ function state = initControllerState(par, x)
 
         case "lee"
             return;
-
-        otherwise
-            error("Unknown controllerName.");
     end
 end
 
@@ -1011,9 +907,6 @@ function [u, state] = runController(x, ref, par, state)
 
         case "px4_iris"
             [u, state] = controllerPX4Iris(x, ref, par, state);
-
-        otherwise
-            error("Unknown controllerName.");
     end
 end
 
@@ -1043,7 +936,6 @@ end
 function [u, state] = controllerPX4Iris(x, ref, par, state)
 
     p = par.px4iris;
-    ref = completeReferenceDerivatives(ref);
 
     dt = par.dt;
     velDot = (x.v - state.px4.prevVel)/max(dt, eps);
@@ -1210,32 +1102,32 @@ function u = controlAllocation(mu, Rd, par)
 
     muCmd = [-mu(1); mu(2:4)];
     u.Rd = Rd;
-    u.muCmd = muCmd;
-    u.actuator = min(max(par.allocation.B\u.muCmd, ...
+    u.actuator = min(max(par.allocation.B\muCmd, ...
         par.allocation.uMin(:)), par.allocation.uMax(:));
+    u.muAllocated = par.allocation.B*u.actuator(:);
 end
 
 function u = controlAllocationPX4Normalized(muNormCmd, Rd, par)
 
-    % muNormCmd is already [Fz; Mx; My; Mz], matching par.allocation.BNorm.
+    % muNormCmd is already [Fz; Mx; My; Mz], matching B_px4_norm.
     u.Rd = Rd;
     u.muNormCmd = muNormCmd(:);
-    u.actuatorNormRaw = par.allocation.BNorm\u.muNormCmd;
+    u.actuatorNormRaw = par.allocation.B_px4_norm\u.muNormCmd;
     u.actuator = min(max(u.actuatorNormRaw, ...
-        par.allocation.uMin(:)), par.allocation.uMax(:));
-    u.muNormAllocated = par.allocation.BNorm*u.actuator(:);
-    u.muCmd = par.allocation.B*u.actuator(:);
+        par.allocation.uNormMin(:)), par.allocation.uNormMax(:));
+    u.muNormAllocated = par.allocation.B_px4_norm*u.actuator(:);
+    u.muAllocated = par.allocation.B_px4*u.actuator(:);
 end
 
 function mu = allocatedWrench(u, par)
 
-    muB = par.allocation.B*u.actuator(:);
-    mu = [-muB(1); muB(2:4)];
+    % Actuator dynamics are neglected here. After allocation and saturation,
+    % the actuator vector is multiplied by the matching allocation matrix to
+    % obtain the physical wrench applied to the rigid-body model.
+    mu = [-u.muAllocated(1); u.muAllocated(2:4)];
 end
 
 function ff = geometricFlatnessReference(ref, par)
-
-    ref = completeReferenceDerivatives(ref);
 
     % Lee Eq. (14), Johnson-Beard Eq. (19), Sun Eq. (14)-(17), in this
     % benchmark's NED coordinates: F_b3 = m*(g*e3 - a_ref).
@@ -1391,17 +1283,11 @@ end
 
 function xNext = stepModel(x, u, par, t0)
 
-    if nargin < 4
-        t0 = 0;
-    end
-
     switch par.integratorName
         case "ode45"
             xNext = stepModelODE45(x, u, par, t0);
         case "lie_rk4"
             xNext = stepModelLieRK4(x, u, par, t0);
-        otherwise
-            error("Unknown integratorName.");
     end
 end
 
@@ -1465,10 +1351,6 @@ end
 
 function [a, OmegaDot] = rigidBodyRates(R, Omega, u, par, t)
 
-    if nargin < 5
-        t = 0;
-    end
-
     [forceDist, momentDist] = disturbanceAtTime(t, par);
     mu = allocatedWrench(u, par);
     T = mu(1);
@@ -1494,10 +1376,10 @@ function plotResults(time, log, par, traj)
     eul = wrapToPiLocal(log.euler);
     eulD = wrapToPiLocal(log.eulerD);
 
-    figure('Name','3D trajectory with sampled attitude');
+    figure;
 
     hActual = plot3(log.p(1,:), log.p(2,:), log.p(3,:), ...
-        'LineWidth', 1.6); 
+        'LineWidth', 1.6);
     hold on;
 
     hRef = plot3(log.pd(1,:), log.pd(2,:), log.pd(3,:), ...
@@ -1510,9 +1392,6 @@ function plotResults(time, log, par, traj)
         case "desired"
             poseP = log.pd;
             poseR = log.Rd;
-        otherwise
-            poseP = log.p;
-            poseR = log.R;
     end
 
     [hx, hy, hz] = drawSampledBodyAxes(time, poseP, poseR, par);
@@ -1529,7 +1408,7 @@ function plotResults(time, log, par, traj)
         {'actual trajectory','reference trajectory','x_B','y_B','z_B'}, ...
         'Location','best');
 
-    figure('Name','position and attitude response');
+    figure;
 
     labels = {'x (m)', 'y (m)', 'z_{NED} (m)', ...
               'roll (deg)', 'pitch (deg)', 'yaw (deg)'};
@@ -1564,7 +1443,7 @@ function plotDerivativeTracking(time, log, par, traj)
     [omegaRef, alphaRef] = rotationLogRates(log.Rd, time);
     alphaActual = loggedAngularAcceleration(log, par);
 
-    figure('Name','velocity and acceleration tracking');
+    figure;
 
     labels = {'v_x (m/s)', 'v_y (m/s)', 'v_z (m/s)', ...
               'a_x (m/s^2)', 'a_y (m/s^2)', 'a_z (m/s^2)'};
@@ -1589,7 +1468,7 @@ function plotDerivativeTracking(time, log, par, traj)
 
     legend('actual','reference');
 
-    figure('Name','angular velocity and angular acceleration tracking');
+    figure;
 
     labels = {'Omega x (rad/s)', 'Omega y (rad/s)', 'Omega z (rad/s)', ...
               'Omega dot x (rad/s^2)', 'Omega dot y (rad/s^2)', ...
