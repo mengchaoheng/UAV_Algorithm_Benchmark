@@ -9,7 +9,7 @@
 %   Omega : body angular velocity expressed in body frame
 %
 % Input after control allocation:
-%   rotorThrusts : four bounded rotor thrusts [N]
+%   actuator : four bounded Iris thrust actuator commands [0,1]
 %
 % Reference interface:
 %   ref.p   position
@@ -36,13 +36,9 @@ end
 %% 0. Parameters
 par.g = 9.81;
 par.e3 = [0;0;1];
-% PX4 x500 actuator geometry with main.m-like normalized dynamics.
-% Special handling: par.m and par.J are dynamic-similarity values, chosen so
-% the x500 actuator limits give the same Tmax/m and tauMax/J as main.m.
-par.m = 1.73579294117647;
-par.J = diag([0.0100408235294118, ...
-              0.0112457223529412, ...
-              0.00721848128342246]);
+% Sun et al. 2022 Table II mass and inertia.
+par.m = 0.75;
+par.J = diag([2.5, 2.1, 4.3])*1e-3;
 
 par.dt = 0.01;          % 100 Hz
 par.Tend = 16.0;
@@ -51,7 +47,7 @@ par.integratorName = "ode45";  % "ode45" or "lie_rk4"
 % Reference time scaling.
 % scale > 1 slows the reference; scale < 1 speeds it up and may saturate control.
 par.progress.mode = "scale_range";      % "scale_fixed" or "scale_range"
-par.progress.scale = 0.8;               % scale_fixed: constant time scale
+par.progress.scale = 1.0;               % scale_fixed: constant time scale
 par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the simulation
 
 % Available choices:
@@ -60,7 +56,7 @@ par.progress.scaleRange = [2, 0.5];   % scale_range: start/end scale over the si
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "helix_flip";
+par.trajName = "flip_loop_sine";
 
 % One knob for all trajectory shapes. The factory below converts it into
 % periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
@@ -68,14 +64,16 @@ par.trajIntensity = 1;  % 0 = gentle, 1 = near the actuator envelope
 par.flipTurns = 3;         % flip trajectories: turns during the second half
 
 % controller
-par.controllerName = "lee";
-% Simple controller gains
-par.Kp = diag([20, 20, 25]);
-par.Kv = diag([9, 9, 10]);
-% Attitude gains are moment gains. Keep them inertia-scaled so changing the
-% platform does not silently change the angular closed-loop dynamics.
-par.KR = 600*par.J;
-par.KOmega = 50*par.J;
+% Available choices:
+%   "lee"       geometric Lee controller
+%   "px4_iris"  PX4 Iris-style cascaded position/attitude/rate controller
+par.controllerName = "px4_iris";
+% Controller gains, using the DFBC gains in Sun et al. Table I as the
+% quantity reference while keeping Lee's moment-control form.
+par.Kp = diag([10, 10, 10]);
+par.Kv = diag([6, 6, 6]);
+par.KR = par.J*diag([150, 150, 3]);
+par.KOmega = par.J*diag([20, 20, 8]);
 
 % Controller-specific gain namespaces. The base gains above remain as
 % convenient defaults, but controller code should use its own namespace so
@@ -85,33 +83,42 @@ par.lee.Kv = par.Kv;
 par.lee.KR = par.KR;
 par.lee.KOmega = par.KOmega;
 
-% Direct physical actuator model, matching main.m's semantics.
-% uRotor is per-rotor thrust [N], and mu=[T;Mx;My;Mz] = G*uRotor.
-% Special handling: motor thrust is calibrated from the 2 kg x500 SDF hover
-% point, while par.m above is the dynamic-similarity mass.
-par.motor.hoverMass = 2.0;
-par.motor.hoverCommand = 0.5;
-par.motor.maxRotVelocity = 1000.0;       % SDF full-scale speed reference.
-par.motor.sdfMotorConstant = 8.54858e-06;
-par.motor.motorConstant = (par.motor.hoverMass*par.g/4) ...
-    /(par.motor.hoverCommand*par.motor.maxRotVelocity)^2;
-par.motor.maxThrust = par.motor.motorConstant*par.motor.maxRotVelocity^2;
+% PX4 Iris controller parameters. The structure follows the current PX4
+% multicopter controller chain:
+%   mc_pos_control -> mc_att_control -> mc_rate_control -> control allocation.
+% The simplified linear plant uses the Iris airframe MPC_THR_HOVER and rate
+% gain overrides from ROMFS/px4fmu_common/init.d-posix/airframes/10015_gazebo-classic_iris.
+par.px4iris.hoverThrust = 0.216;
 
-% Same G structure as main.m:
-%   G=[1; y; -x; kappa*[-1 -1 1 1]].
-par.allocation.method = "inv";
-par.allocation.tBM = [ 0.174, -0.174,  0.174, -0.174;
-                      -0.174,  0.174,  0.174, -0.174;
-                       0.060,  0.060,  0.060,  0.060];
-par.allocation.kappa = 0.016;
-par.allocation.G = [ones(1,4);
-                    par.allocation.tBM(2,:);
-                   -par.allocation.tBM(1,:);
-                    par.allocation.kappa*[-1, -1, 1, 1]];
+% P-only PX4-style baseline tuned inside the PX4 parameter ranges for the
+% aggressive benchmark trajectories. I/D fields are implemented below and
+% can be enabled by overriding these values.
+par.px4iris.posP = [2.0; 2.0; 1.5];
+par.px4iris.velP = [4.5; 4.5; 10.0];
+par.px4iris.velI = [0.0; 0.0; 0.0];
+par.px4iris.velD = [0.0; 0.0; 0.0];
+par.px4iris.attP = [12.0; 12.0; 5.0];
+par.px4iris.rateP = [0.03; 0.03; 0.05];
+par.px4iris.rateI = [0.0; 0.0; 0.0];
+par.px4iris.rateD = [0.0; 0.0; 0.0];
+par.px4iris.rateFF = [0.0; 0.0; 0.0];
+par.px4iris.rateIntLimit = [0.3; 0.3; 0.3];
+par.px4iris.useAccelerationFeedforward = true;
+par.px4iris.useAttitudeRateFeedforward = true;
+
+% Simplified Iris Gazebo Classic actuator model in PX4 effectiveness order:
+%   BPX4 = [Mx; My; Mz; Fx; Fy; Fz].
+% Initialization below derives the two matrices used by this model:
+%   B     = [Fz; Mx; My; Mz]
+%   BNorm = normalized [Fz; Mx; My; Mz].
+par.allocation.BPX4 = [-1.8700,  1.7000,  1.8700, -1.7000;
+                        1.1050, -1.1050,  1.1050, -1.1050;
+                        0.1334106,  0.1334106, -0.1334106, -0.1334106;
+                        0.0, 0.0, 0.0, 0.0;
+                        0.0, 0.0, 0.0, 0.0;
+                       -8.5000, -8.5000, -8.5000, -8.5000];
 par.allocation.uMin = zeros(4,1);
-par.allocation.uMax = par.motor.maxThrust*ones(4,1);
-par.Tmax = allocationForceLimit(par);
-par.tauMax = allocationMomentLimits(par);
+par.allocation.uMax = ones(4,1);
 
 % Additive plant disturbances. The force disturbance is expressed in inertial
 % NED coordinates [N]; the moment disturbance is expressed in the body frame
@@ -146,23 +153,18 @@ if ~isempty(fieldnames(parOverride__))
     par = mergeStructRecursive(par, parOverride__);
 end
 
-par.allocation.G = [ones(1,4);
-                    par.allocation.tBM(2,:);
-                   -par.allocation.tBM(1,:);
-                    par.allocation.kappa*[-1, -1, 1, 1]];
-
-par.allocation.method = lower(string(par.allocation.method));
-if par.allocation.method ~= "inv"
-    error('main_lee.m uses only par.allocation.method = "inv".');
-end
-if ~isequal(size(par.allocation.G), [4 4])
-    error("par.allocation.G must map rotor thrusts to [T;Mx;My;Mz].");
+if size(par.allocation.BPX4, 1) ~= 6
+    error("par.allocation.BPX4 must be PX4 ordered [Mx;My;Mz;Fx;Fy;Fz].");
 end
 par.allocation.uMin = par.allocation.uMin(:);
 par.allocation.uMax = par.allocation.uMax(:);
-par.allocation.Ginv = inv(par.allocation.G);
+par = prepareNormalizedAllocation(par);
 par.Tmax = allocationForceLimit(par);
 par.tauMax = allocationMomentLimits(par);
+
+if ~isfinite(par.px4iris.hoverThrust)
+    par.px4iris.hoverThrust = hoverThrustFromNormalizedAllocation(par);
+end
 
 %% ========================================================================
 %% 1. Build trajectory
@@ -186,6 +188,8 @@ else
     x.Omega = zeros(3,1);
 end
 
+controllerState = initControllerState(par, x);
+
 %% ========================================================================
 %% 3. Logs
 time = 0:par.dt:par.Tend;
@@ -206,7 +210,11 @@ log.eulerD = zeros(3,N);
 
 log.T = zeros(1,N);
 log.tau = zeros(3,N);
-log.rotorThrusts = zeros(4,N);
+log.actuator = zeros(4,N);
+log.thrSp = nan(3,N);
+log.ratesSp = nan(3,N);
+log.rateError = nan(3,N);
+log.torqueNorm = nan(3,N);
 log.forceDist = zeros(3,N);
 log.momentDist = zeros(3,N);
 
@@ -216,7 +224,7 @@ for k = 1:N
     t = time(k);
 
     ref = traj.eval(t);
-    u = controllerLee(x, ref, par);
+    [u, controllerState] = runController(x, ref, par, controllerState);
 
     log.p(:,k) = x.p;
     log.v(:,k) = x.v;
@@ -234,7 +242,19 @@ for k = 1:N
     muApplied = allocatedWrench(u, par);
     log.T(k) = muApplied(1);
     log.tau(:,k) = muApplied(2:4);
-    log.rotorThrusts(:,k) = u.rotorThrusts;
+    log.actuator(:,k) = u.actuator;
+    if isfield(u, 'thrSp')
+        log.thrSp(:,k) = u.thrSp;
+    end
+    if isfield(u, 'ratesSp')
+        log.ratesSp(:,k) = u.ratesSp;
+    end
+    if isfield(u, 'rateError')
+        log.rateError(:,k) = u.rateError;
+    end
+    if isfield(u, 'torqueNorm')
+        log.torqueNorm(:,k) = u.torqueNorm;
+    end
     [log.forceDist(:,k), log.momentDist(:,k)] = disturbanceAtTime(t, par);
 
 
@@ -431,6 +451,15 @@ function y = clampScalar(x, xmin, xmax)
     y = min(max(x, xmin), xmax);
 end
 
+function accSp = referenceAcceleration(ref, p)
+
+    if p.useAccelerationFeedforward
+        accSp = ref.a;
+    else
+        accSp = zeros(3,1);
+    end
+end
+
 function scale = trajectoryScaleAtFraction(par, fraction)
 
     fraction = clampScalar(fraction, 0, 1);
@@ -559,13 +588,13 @@ end
 
 function tauMax = allocationMomentLimits(par)
 
-    G = allocationMatrix(par);
+    B = par.allocation.B;
     lb = par.allocation.uMin(:);
     ub = par.allocation.uMax(:);
     tauMax = zeros(3,1);
 
     for i = 1:3
-        row = G(i+1,:)';
+        row = B(i+1,:)';
         tauHi = sum(max(row.*lb, row.*ub));
         tauLo = sum(min(row.*lb, row.*ub));
         tauMax(i) = max(abs([tauLo, tauHi]));
@@ -574,11 +603,34 @@ end
 
 function Tmax = allocationForceLimit(par)
 
-    G = allocationMatrix(par);
+    B = par.allocation.B;
     lb = par.allocation.uMin(:);
     ub = par.allocation.uMax(:);
-    row = G(1,:)';
+    row = -B(1,:)';
     Tmax = sum(max(row.*lb, row.*ub));
+end
+
+function par = prepareNormalizedAllocation(par)
+
+    Bpx4 = par.allocation.BPX4;
+    [~, BnormPX4] = px4_normalize_B(Bpx4, true);
+
+    par.allocation.B = [Bpx4(6,:); Bpx4(1:3,:)];
+    par.allocation.BNorm = [BnormPX4(6,:); BnormPX4(1:3,:)];
+end
+
+function hoverThrust = hoverThrustFromNormalizedAllocation(par)
+
+    unitHoverCmd = [-1; 0; 0; 0];
+    actuatorPerUnitThrust = par.allocation.BNorm \ unitHoverCmd;
+    physicalWrenchPerUnitThrust = par.allocation.B * actuatorPerUnitThrust;
+    totalThrustPerUnitCommand = -physicalWrenchPerUnitThrust(1);
+
+    if totalThrustPerUnitCommand <= eps
+        error("Normalized allocation cannot produce positive vertical thrust.");
+    end
+
+    hoverThrust = par.m * par.g / totalThrustPerUnitCommand;
 end
 
 function [forceDist, momentDist] = disturbanceAtTime(t, par)
@@ -932,6 +984,39 @@ end
 
 %% Controller layer
 
+function state = initControllerState(par, x)
+
+    state = struct();
+
+    switch string(par.controllerName)
+        case "px4_iris"
+            state.px4.velInt = zeros(3,1);
+            state.px4.prevVel = x.v;
+            state.px4.rateInt = zeros(3,1);
+            state.px4.prevOmega = x.Omega;
+
+        case "lee"
+            return;
+
+        otherwise
+            error("Unknown controllerName.");
+    end
+end
+
+function [u, state] = runController(x, ref, par, state)
+
+    switch string(par.controllerName)
+        case "lee"
+            u = controllerLee(x, ref, par);
+
+        case "px4_iris"
+            [u, state] = controllerPX4Iris(x, ref, par, state);
+
+        otherwise
+            error("Unknown controllerName.");
+    end
+end
+
 function u = controllerLee(x, ref, par)
 
     ex = x.p - ref.p;
@@ -955,26 +1040,197 @@ function u = controllerLee(x, ref, par)
     u = controlAllocation([T; tau], Rc, par);
 end
 
-function G = allocationMatrix(par)
+function [u, state] = controllerPX4Iris(x, ref, par, state)
 
-    G = par.allocation.G;
+    p = par.px4iris;
+    ref = completeReferenceDerivatives(ref);
+
+    dt = par.dt;
+    velDot = (x.v - state.px4.prevVel)/max(dt, eps);
+    angularAccel = (x.Omega - state.px4.prevOmega)/max(dt, eps);
+
+    [thrSp, Rd, state] = px4PositionControl(x, ref, velDot, par, state);
+
+    if p.useAttitudeRateFeedforward
+        [omegaFF, ~] = geometricFeedforwardInDesiredFrame(ref, Rd, par);
+        ratesSp = px4AttitudeControl(x.R, Rd, nan, p) + omegaFF;
+    else
+        ratesSp = px4AttitudeControl(x.R, Rd, ref.psiDot, p);
+    end
+
+    [torqueNorm, rateError, state] = px4RateControl( ...
+        x.Omega, ratesSp, angularAccel, par, p, state);
+
+    thrustBodyZ = -norm(thrSp);
+    muNormCmd = [thrustBodyZ; torqueNorm];
+    u = controlAllocationPX4Normalized(muNormCmd, Rd, par);
+    u.thrSp = thrSp;
+    u.ratesSp = ratesSp;
+    u.rateError = rateError;
+    u.torqueNorm = torqueNorm;
+
+    state.px4.prevVel = x.v;
+    state.px4.prevOmega = x.Omega;
+end
+
+function [thrSp, Rd, state] = px4PositionControl(x, ref, velDot, par, state)
+
+    p = par.px4iris;
+    dt = par.dt;
+
+    velSp = ref.v + (ref.p - x.p) .* p.posP;
+    velError = velSp - x.v;
+    accSp = referenceAcceleration(ref, p) + velError .* p.velP ...
+        + state.px4.velInt - velDot .* p.velD;
+
+    thrSp = px4AccelerationControl(accSp, p, par);
+    state.px4.velInt = state.px4.velInt + velError .* p.velI * dt;
+
+    bodyZ = -thrSp;
+    Rd = px4BodyZToAttitude(bodyZ, ref.psi);
+end
+
+function thrSp = px4AccelerationControl(accSp, p, par)
+
+    zSpecificForce = -par.g + accSp(3);
+    bodyZ = [-accSp(1); -accSp(2); -zSpecificForce];
+
+    if norm(bodyZ) < eps
+        bodyZ = par.e3;
+    else
+        bodyZ = bodyZ/norm(bodyZ);
+    end
+
+    thrustNedZ = accSp(3) * (p.hoverThrust/par.g) - p.hoverThrust;
+    cosNedBody = dot(par.e3, bodyZ);
+    collectiveThrust = thrustNedZ/cosNedBody;
+    thrSp = bodyZ * collectiveThrust;
+end
+
+function Rd = px4BodyZToAttitude(bodyZ, yawSp)
+
+    if norm(bodyZ)^2 < eps
+        bodyZ = [0; 0; 1];
+    else
+        bodyZ = bodyZ/norm(bodyZ);
+    end
+
+    yC = [-sin(yawSp); cos(yawSp); 0];
+    bodyX = cross(yC, bodyZ);
+
+    if bodyZ(3) < 0
+        bodyX = -bodyX;
+    end
+
+    if abs(bodyZ(3)) < 1e-6
+        bodyX = [0; 0; 1];
+    end
+
+    if norm(bodyX) < eps
+        bodyX = [1; 0; 0];
+    else
+        bodyX = bodyX/norm(bodyX);
+    end
+
+    bodyY = cross(bodyZ, bodyX);
+    Rd = [bodyX, bodyY, bodyZ];
+end
+
+function ratesSp = px4AttitudeControl(R, Rd, yawRateSp, p)
+
+    q = rotmToQuatWXYZ(R);
+    qd = rotmToQuatWXYZ(Rd);
+    qError = quatCanonicalWXYZ( ...
+        quatMultiplyWXYZ(quatInverseWXYZ(q), qd));
+    ratesSp = 2*qError(2:4) .* p.attP;
+    if isfinite(yawRateSp)
+        ratesSp = ratesSp + R' * [0; 0; 1] * yawRateSp;
+    end
+end
+
+function [torqueNorm, rateError, state] = px4RateControl( ...
+        rates, ratesSp, angularAccel, par, p, state)
+
+    rateError = ratesSp - rates;
+    torqueNorm = p.rateP .* rateError + state.px4.rateInt ...
+        - p.rateD .* angularAccel + p.rateFF .* ratesSp;
+
+    dt = par.dt;
+    for i = 1:3
+        iFactor = rateError(i)/deg2rad(400);
+        iFactor = max(0, 1 - iFactor^2);
+        nextInt = state.px4.rateInt(i) ...
+            + iFactor*p.rateI(i)*rateError(i)*dt;
+
+        if isfinite(nextInt)
+            state.px4.rateInt(i) = clampScalar(nextInt, ...
+                -p.rateIntLimit(i), p.rateIntLimit(i));
+        end
+    end
+end
+
+function q = quatMultiplyWXYZ(q1, q2)
+
+    w1 = q1(1);
+    v1 = q1(2:4);
+    w2 = q2(1);
+    v2 = q2(2:4);
+
+    q = [w1*w2 - dot(v1, v2); ...
+         w1*v2 + w2*v1 + cross(v1, v2)];
+    q = normalizeQuatWXYZ(q);
+end
+
+function qInv = quatInverseWXYZ(q)
+
+    q = normalizeQuatWXYZ(q);
+    qInv = [q(1); -q(2:4)];
+end
+
+function q = quatCanonicalWXYZ(q)
+
+    q = normalizeQuatWXYZ(q);
+
+    if q(1) < 0
+        q = -q;
+    elseif abs(q(1)) < eps
+        for i = 2:4
+            if abs(q(i)) > eps
+                if q(i) < 0
+                    q = -q;
+                end
+
+                break;
+            end
+        end
+    end
 end
 
 function u = controlAllocation(mu, Rd, par)
 
-    % Public allocation interface for main_lee:
-    %   controller mu=[T;Mx;My;Mz] -> rotorThrusts=Ginv*mu -> actuator limits.
+    muCmd = [-mu(1); mu(2:4)];
     u.Rd = Rd;
-    u.muCmd = mu(:);
-    u.rotorThrusts = min(max(par.allocation.Ginv*u.muCmd, ...
+    u.muCmd = muCmd;
+    u.actuator = min(max(par.allocation.B\u.muCmd, ...
         par.allocation.uMin(:)), par.allocation.uMax(:));
+end
+
+function u = controlAllocationPX4Normalized(muNormCmd, Rd, par)
+
+    % muNormCmd is already [Fz; Mx; My; Mz], matching par.allocation.BNorm.
+    u.Rd = Rd;
+    u.muNormCmd = muNormCmd(:);
+    u.actuatorNormRaw = par.allocation.BNorm\u.muNormCmd;
+    u.actuator = min(max(u.actuatorNormRaw, ...
+        par.allocation.uMin(:)), par.allocation.uMax(:));
+    u.muNormAllocated = par.allocation.BNorm*u.actuator(:);
+    u.muCmd = par.allocation.B*u.actuator(:);
 end
 
 function mu = allocatedWrench(u, par)
 
-    % Plant-side effectiveness: limited rotor thrusts produce the actual
-    % applied wrench mu=[T;Mx;My;Mz].
-    mu = par.allocation.G*u.rotorThrusts(:);
+    muB = par.allocation.B*u.actuator(:);
+    mu = [-muB(1); muB(2:4)];
 end
 
 function ff = geometricFlatnessReference(ref, par)
