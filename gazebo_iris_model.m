@@ -24,12 +24,12 @@ x = min(max(x, 0), 1);
 % PX4/SITL -> Gazebo mavlink_interface
 % armed:
 % omega = (x + input_offset) * input_scaling + zero_position_armed
-omega = 1000*x + 0;
-omega = min(max(omega, 0), 1000);
+omega = 2.3726e+03*x + 0;
+omega = min(max(omega, 0), 2.3726e+03);
 
 % ===== SDF motor model: rotor speed -> thrust =====
 % SDF: F = motorConstant * omega^2
-motorConstant = 8.5e-06;
+motorConstant = 1.51e-6;
 F = motorConstant * omega.^2;
 
 % ===== SDF physical B: motor thrust -> body wrench =====
@@ -45,39 +45,12 @@ pos = [ ...
 spin = [1; 1; -1; -1];   % ccw=+1, cw=-1
 momentConstant = 0.0156953642384106;
 
-B_force = zeros(6,4);
+force_body = [zeros(2, 4); -F'];   % PX4 FRD: upward thrust is negative Z
+moment_body = zeros(3, 4);
 
 for i = 1:4
-    r = pos(i,:)';
-    force_per_N = [0; 0; -1];
-    moment_per_N = cross(r, force_per_N) + [0; 0; spin(i)*momentConstant];
-
-    B_force(:,i) = [moment_per_N; force_per_N];
+    moment_body(:, i) = cross(pos(i, :)', force_body(:, i)) ...
+                      + [0; 0; spin(i) * momentConstant * F(i)];
 end
 
-% ===== 实际物理力和力矩 =====
-y = B_force * F;
-
-% Physical SDF model:
-%   omega_cmd = input_scaling*x + zero_position_armed
-%   F = motorConstant * omega_cmd^2
-%
-% For allocation we choose/interpret the actuator mapping so that:
-%   F ~= Fmax * u_alloc
-%
-% Then:
-%   y = B_force * F
-%     = B_force * Fmax * u_alloc
-%     = B_px4 * u_alloc
-
-F_max=motorConstant * 1000.^2;
-B_px4= B_force * F_max 
-
-% B_px4 =
-% 
-%    -1.2848    1.1680    1.2848   -1.1680
-%     0.7592   -0.7592    0.7592   -0.7592
-%     0.2920    0.2920   -0.2920   -0.2920
-%          0         0         0         0
-%          0         0         0         0
-%    -5.8400   -5.8400   -5.8400   -5.8400
+wrench_body = [sum(moment_body, 2); sum(force_body, 2)] % [Mx; My; Mz; Fx; Fy; Fz]
