@@ -22,12 +22,13 @@ trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_
 % Available controllers for this comparison:
 % "geometric", "faessler", "lee", "johnson_beard"
 % "sun_dfbc", "sun_dfbc_indi"
-% "lu_on_manifold_lqr", "sun_nmpc", "sun_nmpc_indi"
+% "lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi"
 % "geometric_indi", "tal_karaman"
 % controllerNames = ["geometric", "faessler", "lee", "johnson_beard", "sun_dfbc_indi","geometric_indi", "tal_karaman"];
 % controllerNames = ["sun_dfbc", "sun_nmpc", "sun_dfbc_indi", "sun_nmpc_indi"];
-controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal_karaman"];
+% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal_karaman"];
 % controllerNames = ["sun_dfbc_indi", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
+controllerNames = ["lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
 %% ========================================================================
 %% 1. Disturbance Settings
 

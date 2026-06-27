@@ -16,7 +16,11 @@
 %   ref.p   position
 %   ref.v   velocity
 %   ref.a   acceleration
+%   ref.j   jerk
+%   ref.s   snap
 %   ref.psi yaw
+%   ref.psiDot yaw rate
+%   ref.psiDDot yaw acceleration
 
 if exist('UAV_BENCHMARK_BATCH', 'var') && UAV_BENCHMARK_BATCH
     if exist('UAV_BENCHMARK_PAR_OVERRIDE', 'var')
@@ -63,9 +67,9 @@ par.flipTurns = 3;         % flip trajectories: turns during the second half
 % controller
 % "geometric", "faessler", "lee", "johnson_beard"
 % "sun_dfbc", "sun_dfbc_indi"
-% "lu_on_manifold_lqr", "sun_nmpc", "sun_nmpc_indi"
+% "lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi"
 % "geometric_indi", "tal_karaman"
-par.controllerName = "geometric_indi";
+par.controllerName = "lee";
 % Simple controller gains
 par.Kp = diag([20, 20, 25]);
 par.Kv = diag([9, 9, 10]);
@@ -92,16 +96,41 @@ par.johnsonBeard.Kv = par.Kv;
 par.johnsonBeard.KR = par.KR;
 par.johnsonBeard.KOmega = par.KOmega;
 
-% Lu et al. on-manifold finite-horizon LQR approximation.
+% Unified actuator model and control allocation.
+% All controllers produce a desired wrench mu = [T; tau], then this layer
+% maps it to rotor thrusts and back to the actual wrench applied by the
+% benchmark plant. Choose "wls" for bound-aware weighted least squares or
+% "pinv" for pseudoinverse followed by clipping.
+par.allocation.method = "wls";
+par.allocation.tBM = [ 0.075, -0.075, -0.075,  0.075;
+                      -0.100,  0.100, -0.100,  0.100;
+                       0.000,  0.000,  0.000,  0.000];
+par.allocation.kappa = 0.022;
+par.allocation.uMin = zeros(4,1);
+par.allocation.uMax = 8.5*ones(4,1);
+par.allocation.W = diag([0.001, 10, 10, 0.1]);
+par.Tmax = sum(par.allocation.uMax);
+par.tauMax = allocationMomentLimits(par);
+
+% Lu et al. on-manifold MPC, Eq. (6)-(16).
 % State error: [p-pd; v-vd; Log(Rd'R)], input: [aT-aTd; Omega-OmegaD].
-par.mpc.N = 16; % Lu et al. use N=8; use longer horizon for the simulated rate loop.
+par.mpc.N = 8; % Lu et al. use N=8 and run the MPC at 100 Hz.
 par.mpc.Q = diag([450, 450, 650, ...
                   70, 70, 100, ...
                   140, 140, 80]);
 par.mpc.R = diag([1.0, 0.55, 0.55, 0.75]);
 par.mpc.P = par.mpc.Q;
+par.mpc.maxQPIt = 120;
+par.mpc.qpTol = 1e-7;
 par.mpc.omegaMax = deg2rad(800);
-par.mpc.KOmega = par.KOmega;
+par.mpc.rateController = "p"; % "p", "pid", or "indi".
+% Lu's MPC input is [thrust acceleration; body rate]. The benchmark plant
+% accepts force/moment, so a body-rate inner loop converts Omega_cmd to tau.
+par.mpc.rate.Kp = par.KOmega;      % P/PID moment gain.
+par.mpc.rate.Ki = zeros(3);        % PID only.
+par.mpc.rate.Kd = zeros(3);        % PID only.
+par.mpc.rate.integralLimit = deg2rad(120)*ones(3,1);
+par.mpc.rate.indiK = 55*eye(3);    % INDI rate error -> angular acceleration.
 
 % Sun et al. 2022, Table I and Table II controller/platform parameters.
 % The benchmark plant above uses the same Kingfisher mass/inertia, and Sun
@@ -120,14 +149,11 @@ par.sun.Kv = diag([6, 6, 6]);
 par.sun.KqRed = diag([150, 150, 0]);
 par.sun.kqYaw = 3;
 par.sun.KOmega = diag([20, 20, 8]);
-par.sun.W = diag([0.001, 10, 10, 0.1]);
-par.sun.wlsAllocPath = "/Users/mchmini/Proj/control_allocation/control_allocation_lib/qcat/QCAT/qcat";
-par.sun.tBM = [ 0.075, -0.075, -0.075,  0.075;
-               -0.100,  0.100, -0.100,  0.100;
-                0.000,  0.000,  0.000,  0.000];
-par.sun.kappa = 0.022;
-par.sun.uMin = zeros(4,1);
-par.sun.uMax = 8.5*ones(4,1);
+par.sun.W = par.allocation.W;
+par.sun.tBM = par.allocation.tBM;
+par.sun.kappa = par.allocation.kappa;
+par.sun.uMin = par.allocation.uMin;
+par.sun.uMax = par.allocation.uMax;
 par.sun.omegaMax = [10; 10; 4];
 acadosSourceDir = string(getenv("ACADOS_SOURCE_DIR"));
 if strlength(acadosSourceDir) == 0
@@ -192,10 +218,6 @@ par.tal.alphaRefMax = 500;
 par.tal.omegaRefMax = 80;
 par.tal.flatnessRcondMin = 1e-6;
 
-% Actuator limits from four Kingfisher rotors, u_i in [0, 8.5] N.
-par.Tmax = 4*8.5;
-par.tauMax = [1.70; 1.275; 0.374];
-
 % Additive plant disturbances. The force disturbance is expressed in inertial
 % NED coordinates [N]; the moment disturbance is expressed in the body frame
 % [N*m], matching the plant translational and rotational equations below.
@@ -228,6 +250,8 @@ par.animationFrameDt = 0.02;    % seconds
 if ~isempty(fieldnames(parOverride__))
     par = mergeStructRecursive(par, parOverride__);
 end
+par = finalizeActuatorModel(par);
+par = finalizeMPCConfig(par);
 
 %% ========================================================================
 %% 1. Build trajectory
@@ -394,9 +418,9 @@ function traj = applyTrajectoryProgress(traj, par)
 
             traj.Tend = scale*baseTend;
             traj.eval = @(t) evalProgressTrajectory( ...
-                baseEval, t/scale, 1/scale, 0, baseTend);
+                baseEval, t/scale, 1/scale, 0, 0, 0, baseTend);
             traj.evalPredict = @(t) evalProgressTrajectory( ...
-                baseEval, t/scale, 1/scale, 0, baseTend, true);
+                baseEval, t/scale, 1/scale, 0, 0, 0, baseTend, true);
 
             if abs(scale - 1) >= 1e-12
                 traj.name = traj.name + "_timeScale_" + string(scale);
@@ -457,19 +481,25 @@ function ref = evalScaleRangeTrajectory( ...
         s = s + (t - simTend)/scale1;
         sDot = 1/scale1;
         sDDot = 0;
+        sDDDot = 0;
+        sDDDDot = 0;
     else
         sDot = 1/scale;
         sDDot = -scaleDot/scale^2;
+        sDDDot = 2*scaleDot^2/scale^3;
+        sDDDDot = -6*scaleDot^3/scale^4;
     end
 
     ref = evalProgressTrajectory( ...
-        baseEval, s, sDot, sDDot, baseTend, allowPredict);
+        baseEval, s, sDot, sDDot, sDDDot, sDDDDot, ...
+        baseTend, allowPredict);
 end
 
 function ref = evalProgressTrajectory( ...
-        baseEval, s, sDot, sDDot, baseTend, allowPredict)
+        baseEval, s, sDot, sDDot, sDDDot, sDDDDot, ...
+        baseTend, allowPredict)
 
-    if nargin < 6
+    if nargin < 8
         allowPredict = false;
     end
 
@@ -480,11 +510,23 @@ function ref = evalProgressTrajectory( ...
     end
 
     ref = baseEval(s);
+    ref = completeReferenceDerivatives(ref);
 
     vBase = ref.v;
     aBase = ref.a;
+    jBase = ref.j;
+    sBase = ref.s;
+    psiDotBase = ref.psiDot;
+    psiDDotBase = ref.psiDDot;
+
     ref.v = vBase*sDot;
     ref.a = aBase*sDot^2 + vBase*sDDot;
+    ref.j = jBase*sDot^3 + 3*aBase*sDot*sDDot + vBase*sDDDot;
+    ref.s = sBase*sDot^4 + 6*jBase*sDot^2*sDDot ...
+        + 3*aBase*sDDot^2 + 4*aBase*sDot*sDDDot ...
+        + vBase*sDDDDot;
+    ref.psiDot = psiDotBase*sDot;
+    ref.psiDDot = psiDDotBase*sDot^2 + psiDotBase*sDDot;
 end
 
 function y = clampScalar(x, xmin, xmax)
@@ -617,6 +659,84 @@ function dst = mergeStructRecursive(dst, src)
     end
 end
 
+function par = finalizeActuatorModel(par)
+
+    required = ["tBM", "kappa", "uMin", "uMax", "W"];
+    for i = 1:numel(required)
+        name = required(i);
+        if ~isfield(par.allocation, name)
+            error("par.allocation.%s is required.", name);
+        end
+    end
+
+    par.allocation.method = lower(string(par.allocation.method));
+    if ~any(par.allocation.method == ["wls", "pinv"])
+        error("par.allocation.method must be ""wls"" or ""pinv"".");
+    end
+
+    par.allocation.uMin = par.allocation.uMin(:);
+    par.allocation.uMax = par.allocation.uMax(:);
+    if numel(par.allocation.uMin) ~= 4 || numel(par.allocation.uMax) ~= 4
+        error("The benchmark actuator model expects four rotor thrusts.");
+    end
+
+    par.Tmax = sum(par.allocation.uMax);
+    par.tauMax = allocationMomentLimits(par);
+
+    % Keep Sun NMPC/DFBC parameters on the same actuator model. This is a
+    % compatibility mirror; par.allocation is the source of truth.
+    par.sun.tBM = par.allocation.tBM;
+    par.sun.kappa = par.allocation.kappa;
+    par.sun.uMin = par.allocation.uMin;
+    par.sun.uMax = par.allocation.uMax;
+    par.sun.W = par.allocation.W;
+end
+
+function par = finalizeMPCConfig(par)
+
+    if ~isfield(par, 'mpc')
+        return;
+    end
+
+    if ~isfield(par.mpc, 'rateController')
+        par.mpc.rateController = "p";
+    end
+    par.mpc.rateController = lower(string(par.mpc.rateController));
+    if ~any(par.mpc.rateController == ["p", "pid", "indi"])
+        error('par.mpc.rateController must be "p", "pid", or "indi".');
+    end
+
+    if ~isfield(par.mpc, 'rate') || ~isstruct(par.mpc.rate)
+        par.mpc.rate = struct();
+    end
+
+    par.mpc.rate.Kp = matrix3(getStructField(par.mpc.rate, 'Kp', par.KOmega), ...
+        'par.mpc.rate.Kp');
+    par.mpc.rate.Ki = matrix3(getStructField(par.mpc.rate, 'Ki', zeros(3)), ...
+        'par.mpc.rate.Ki');
+    par.mpc.rate.Kd = matrix3(getStructField(par.mpc.rate, 'Kd', zeros(3)), ...
+        'par.mpc.rate.Kd');
+    par.mpc.rate.indiK = matrix3(getStructField(par.mpc.rate, 'indiK', 55*eye(3)), ...
+        'par.mpc.rate.indiK');
+    par.mpc.rate.integralLimit = vector3( ...
+        getStructField(par.mpc.rate, 'integralLimit', deg2rad(120)*ones(3,1)));
+end
+
+function tauMax = allocationMomentLimits(par)
+
+    G = allocationMatrix(par);
+    lb = par.allocation.uMin(:);
+    ub = par.allocation.uMax(:);
+    tauMax = zeros(3,1);
+
+    for i = 1:3
+        row = G(i+1,:)';
+        tauHi = sum(max(row.*lb, row.*ub));
+        tauLo = sum(min(row.*lb, row.*ub));
+        tauMax(i) = max(abs([tauLo, tauHi]));
+    end
+end
+
 function [forceDist, momentDist] = disturbanceAtTime(t, par)
 
     forceDist = zeros(3,1);
@@ -669,6 +789,21 @@ function value = getStructField(s, name, defaultValue)
     end
 end
 
+function M = matrix3(x, name)
+
+    if isscalar(x)
+        M = x*eye(3);
+    elseif isvector(x) && numel(x) == 3
+        M = diag(x(:));
+    else
+        M = x;
+    end
+
+    if ~isequal(size(M), [3, 3])
+        error("%s must be scalar, 3-vector, or 3x3.", name);
+    end
+end
+
 function v = vector3(x)
 
     if isscalar(x)
@@ -678,7 +813,116 @@ function v = vector3(x)
     end
 
     if numel(v) ~= 3
-        error("Disturbance amplitude/frequency/phase must be scalar or 3x1.");
+        error("Value must be scalar or 3x1.");
+    end
+end
+
+function ref = completeReferenceDerivatives(ref)
+
+    if ~isfield(ref, 'j')
+        ref.j = zeros(3,1);
+    end
+
+    if ~isfield(ref, 's')
+        ref.s = zeros(3,1);
+    end
+
+    if ~isfield(ref, 'psiDot')
+        ref.psiDot = 0;
+    end
+
+    if ~isfield(ref, 'psiDDot')
+        ref.psiDDot = 0;
+    end
+end
+
+function ref = setHeadingFromVelocity(ref, defaultPsi)
+
+    speed2 = ref.v(1)^2 + ref.v(2)^2;
+
+    if speed2 < 1e-10
+        % Special handling: yaw is undefined at zero horizontal speed, e.g.
+        % hover segments. Keep the requested default heading exactly.
+        ref.psi = defaultPsi;
+        ref.psiDot = 0;
+        ref.psiDDot = 0;
+        return;
+    end
+
+    num = ref.v(1)*ref.a(2) - ref.v(2)*ref.a(1);
+    denDot = 2*(ref.v(1)*ref.a(1) + ref.v(2)*ref.a(2));
+    numDot = ref.v(1)*ref.j(2) - ref.v(2)*ref.j(1);
+
+    ref.psi = atan2(ref.v(2), ref.v(1));
+    ref.psiDot = num/speed2;
+    ref.psiDDot = (numDot*speed2 - num*denDot)/speed2^2;
+end
+
+function ref = setConstantHeading(ref, psi)
+
+    ref.psi = psi;
+    ref.psiDot = 0;
+    ref.psiDDot = 0;
+end
+
+function [q, qDot, qDDot, q3, q4] = rampedTime(t, tRamp)
+
+    if t <= 0
+        q = 0;
+        qDot = 0;
+        qDDot = 0;
+        q3 = 0;
+        q4 = 0;
+        return;
+    end
+
+    if t >= tRamp
+        q = t - 0.5*tRamp;
+        qDot = 1;
+        qDDot = 0;
+        q3 = 0;
+        q4 = 0;
+        return;
+    end
+
+    sigma = t/tRamp;
+
+    q = 0.5*t - 0.5*tRamp/pi*sin(pi*sigma);
+    qDot = 0.5*(1 - cos(pi*sigma));
+    qDDot = 0.5*pi/tRamp*sin(pi*sigma);
+    q3 = 0.5*pi^2/tRamp^2*cos(pi*sigma);
+    q4 = -0.5*pi^3/tRamp^3*sin(pi*sigma);
+end
+
+function [y, yd, ydd, y3, y4] = trigDerivatives( ...
+        amplitude, theta, thetaDot, thetaDDot, theta3, theta4, kind)
+
+    s = sin(theta);
+    c = cos(theta);
+
+    switch string(kind)
+        case "sin"
+            y = amplitude*s;
+            yd = amplitude*c*thetaDot;
+            ydd = amplitude*(c*thetaDDot - s*thetaDot^2);
+            y3 = amplitude*(c*theta3 - 3*s*thetaDot*thetaDDot ...
+                - c*thetaDot^3);
+            y4 = amplitude*(c*theta4 - 4*s*thetaDot*theta3 ...
+                - 3*s*thetaDDot^2 - 6*c*thetaDot^2*thetaDDot ...
+                + s*thetaDot^4);
+
+        case "cos"
+            y = amplitude*c;
+            yd = -amplitude*s*thetaDot;
+            ydd = amplitude*(-c*thetaDot^2 - s*thetaDDot);
+            y3 = amplitude*(s*thetaDot^3 - 3*c*thetaDot*thetaDDot ...
+                - s*theta3);
+            y4 = amplitude*(c*thetaDot^4 + 6*s*thetaDot^2*thetaDDot ...
+                - 3*c*thetaDDot^2 - 4*c*thetaDot*theta3 ...
+                - s*theta4);
+
+        otherwise
+            error("Unknown trigonometric derivative kind.");
     end
 end
 
@@ -697,19 +941,17 @@ function ref = evalFigure8Horizontal(t, cfg)
 
     Om = 2*pi/cfg.Tfig;
 
-    ref.p = [cfg.Ax*sin(Om*t);
-             cfg.Ay*sin(2*Om*t);
-            -cfg.h0];
+    [x, vx, ax, jx, sx] = trigDerivatives( ...
+        cfg.Ax, Om*t, Om, 0, 0, 0, "sin");
+    [y, vy, ay, jy, sy] = trigDerivatives( ...
+        cfg.Ay, 2*Om*t, 2*Om, 0, 0, 0, "sin");
 
-    ref.v = [cfg.Ax*Om*cos(Om*t);
-             2*cfg.Ay*Om*cos(2*Om*t);
-             0];
-
-    ref.a = [-cfg.Ax*Om^2*sin(Om*t);
-             -4*cfg.Ay*Om^2*sin(2*Om*t);
-             0];
-
-    ref.psi = atan2(ref.v(2), ref.v(1));
+    ref.p = [x; y; -cfg.h0];
+    ref.v = [vx; vy; 0];
+    ref.a = [ax; ay; 0];
+    ref.j = [jx; jy; 0];
+    ref.s = [sx; sy; 0];
+    ref = setHeadingFromVelocity(ref, 0);
 end
 
 %% ========================================================================
@@ -736,33 +978,33 @@ function ref = evalFigure8Vertical(t, cfg)
         ref.p = [0; -cfg.Ay/sqrt(2); -cfg.hLow];
         ref.v = [0; 0; 0];
         ref.a = [0; 0; 0];
-        ref.psi = 0;
+        ref.j = [0; 0; 0];
+        ref.s = [0; 0; 0];
+        ref = setConstantHeading(ref, 0);
         return;
     end
 
     tau = t - cfg.tHover;
-    [q, qDot, qDDot] = rampedTime(tau, cfg.tRamp);
+    [q, qDot, qDDot, q3, q4] = rampedTime(tau, cfg.tRamp);
 
     theta = cfg.theta0 + Om*q;
     thetaDot = Om*qDot;
     thetaDDot = Om*qDDot;
+    theta3 = Om*q3;
+    theta4 = Om*q4;
 
-    h = hCenter + cfg.Az*sin(2*theta);
+    [y, vy, ay, jy, sy] = trigDerivatives( ...
+        cfg.Ay, theta, thetaDot, thetaDDot, theta3, theta4, "sin");
+    [zOsc, vz, az, jz, sz] = trigDerivatives( ...
+        -cfg.Az, 2*theta, 2*thetaDot, 2*thetaDDot, ...
+        2*theta3, 2*theta4, "sin");
 
-    ref.p = [0;
-             cfg.Ay*sin(theta);
-            -h];
-
-    ref.v = [0;
-             cfg.Ay*cos(theta)*thetaDot;
-            -2*cfg.Az*cos(2*theta)*thetaDot];
-
-    ref.a = [0;
-             cfg.Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
-             4*cfg.Az*sin(2*theta)*thetaDot^2 ...
-             - 2*cfg.Az*cos(2*theta)*thetaDDot];
-
-    ref.psi = 0;
+    ref.p = [0; y; -hCenter + zOsc];
+    ref.v = [0; vy; vz];
+    ref.a = [0; ay; az];
+    ref.j = [0; jy; jz];
+    ref.s = [0; sy; sz];
+    ref = setConstantHeading(ref, 0);
 end
 
 %% ========================================================================
@@ -795,55 +1037,32 @@ function ref = evalFlipLoop(t, cfg)
         ref.p = [0; 0; -hHover];
         ref.v = [0; 0; 0];
         ref.a = [0; 0; 0];
-        ref.psi = 0;
+        ref.j = [0; 0; 0];
+        ref.s = [0; 0; 0];
+        ref = setConstantHeading(ref, 0);
         return;
     end
 
     tau = t - tHover;
-    [q, qDot, qDDot] = rampedTime(tau, tRamp);
+    [q, qDot, qDDot, q3, q4] = rampedTime(tau, tRamp);
 
     theta = pi + Om*q;
     thetaDot = Om*qDot;
     thetaDDot = Om*qDDot;
+    theta3 = Om*q3;
+    theta4 = Om*q4;
 
-    h = hCenter + Az*cos(theta);
+    [y, vy, ay, jy, sy] = trigDerivatives( ...
+        Ay, theta, thetaDot, thetaDDot, theta3, theta4, "sin");
+    [zOsc, vz, az, jz, sz] = trigDerivatives( ...
+        -Az, theta, thetaDot, thetaDDot, theta3, theta4, "cos");
 
-    ref.p = [vx*q;
-             Ay*sin(theta);
-            -h];
-
-    ref.v = [vx*qDot;
-             Ay*cos(theta)*thetaDot;
-             Az*sin(theta)*thetaDot];
-
-    ref.a = [vx*qDDot;
-             Ay*(-sin(theta)*thetaDot^2 + cos(theta)*thetaDDot);
-             Az*(cos(theta)*thetaDot^2 + sin(theta)*thetaDDot)];
-
-    ref.psi = 0;
-end
-
-function [q, qDot, qDDot] = rampedTime(t, tRamp)
-
-    if t <= 0
-        q = 0;
-        qDot = 0;
-        qDDot = 0;
-        return;
-    end
-
-    if t >= tRamp
-        q = t - 0.5*tRamp;
-        qDot = 1;
-        qDDot = 0;
-        return;
-    end
-
-    s = t/tRamp;
-
-    q = 0.5*t - 0.5*tRamp/pi*sin(pi*s);
-    qDot = 0.5*(1 - cos(pi*s));
-    qDDot = 0.5*pi/tRamp*sin(pi*s);
+    ref.p = [vx*q; y; -hCenter + zOsc];
+    ref.v = [vx*qDot; vy; vz];
+    ref.a = [vx*qDDot; ay; az];
+    ref.j = [vx*q3; jy; jz];
+    ref.s = [vx*q4; sy; sz];
+    ref = setConstantHeading(ref, 0);
 end
 
 %% ========================================================================
@@ -859,19 +1078,17 @@ function ref = evalFastCircle(t, cfg)
 
     Om = 2*pi/cfg.Tcircle;
 
-    ref.p = [cfg.radius*cos(Om*t);
-             cfg.radius*sin(Om*t);
-            -cfg.h0];
+    [x, vx, ax, jx, sx] = trigDerivatives( ...
+        cfg.radius, Om*t, Om, 0, 0, 0, "cos");
+    [y, vy, ay, jy, sy] = trigDerivatives( ...
+        cfg.radius, Om*t, Om, 0, 0, 0, "sin");
 
-    ref.v = [-cfg.radius*Om*sin(Om*t);
-              cfg.radius*Om*cos(Om*t);
-              0];
-
-    ref.a = [-cfg.radius*Om^2*cos(Om*t);
-             -cfg.radius*Om^2*sin(Om*t);
-             0];
-
-    ref.psi = atan2(ref.v(2), ref.v(1));
+    ref.p = [x; y; -cfg.h0];
+    ref.v = [vx; vy; 0];
+    ref.a = [ax; ay; 0];
+    ref.j = [jx; jy; 0];
+    ref.s = [sx; sy; 0];
+    ref = setHeadingFromVelocity(ref, 0);
 end
 
 function T = periodForAccel(lengthCoeff, accelLimit, Tmin, Tmax)
@@ -887,9 +1104,9 @@ function u = controller(x, ref, traj, t, par)
         case "geometric"
             u = controllerPDGeometric(x, ref, par);
         case "lee"
-            u = controllerLee(x, ref, t, par);
+            u = controllerLee(x, ref, par);
         case "johnson_beard"
-            u = controllerJohnsonBeard(x, ref, t, par);
+            u = controllerJohnsonBeard(x, ref, par);
         case "sun_nmpc"
             u = controllerSunNMPC(x, ref, traj, t, par);
         case "sun_dfbc"
@@ -898,8 +1115,8 @@ function u = controller(x, ref, traj, t, par)
             u = controllerSunNMPCINDI(x, ref, traj, t, par);
         case "sun_dfbc_indi"
             u = controllerSunDFBCINDI(x, ref, traj, t, par);
-        case "lu_on_manifold_lqr"
-            u = controllerLuOnManifoldLQR(x, ref, traj, t, par);
+        case "lu_on_manifold_mpc"
+            u = controllerLuOnManifoldMPC(x, ref, traj, t, par);
         case "geometric_indi"
             u = controllerGeometricINDI(x, ref, t, par);
         case "faessler"
@@ -925,14 +1142,10 @@ function u = controllerPDGeometric(x, ref, par)
     tau = cross(x.Omega, par.J*x.Omega) ...
         + par.geometric.KR*rErr + par.geometric.KOmega*(zeros(3,1)-x.Omega);
 
-    u.T = min(max(T, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rd;
+    u = wrenchToControl(T, tau, Rd, par);
 end
 
-function u = controllerLee(x, ref, t, par)
-
-    persistent st
+function u = controllerLee(x, ref, par)
 
     ex = x.p - ref.p;
     ev = x.v - ref.v;
@@ -940,38 +1153,22 @@ function u = controllerLee(x, ref, t, par)
     aCmd = ref.a - par.lee.Kp*ex - par.lee.Kv*ev;
     thrustAxisForce = par.m*(par.g*par.e3 - aCmd);
     [Rc, ~] = desiredAttitudeFromThrustVector(thrustAxisForce, ref.psi, par);
-
-    if isempty(st) || t <= par.dt/2 || t <= st.t
-        OmegaC = zeros(3,1);
-        OmegaCDot = zeros(3,1);
-    else
-        h = max(t - st.t, par.dt);
-        OmegaC = -LogSO3(Rc' * st.Rc)/h;
-        OmegaCPrev = Rc' * st.Rc * st.OmegaC;
-        OmegaCDot = (OmegaC - OmegaCPrev)/h;
-    end
+    [OmegaC, OmegaCDot] = geometricFeedforwardInDesiredFrame(ref, Rc, par);
 
     eR = 0.5*vee(Rc' * x.R - x.R' * Rc);
     eOmega = x.Omega - x.R' * Rc * OmegaC;
 
+    % Lee et al. Eq. (12)-(13), rewritten for the NED plant.
     tau = -par.lee.KR*eR - par.lee.KOmega*eOmega ...
         + cross(x.Omega, par.J*x.Omega) ...
         - par.J*(hat(x.Omega)*x.R' * Rc * OmegaC - x.R' * Rc * OmegaCDot);
 
     T = dot(thrustAxisForce, x.R*par.e3);
 
-    u.T = min(max(T, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rc;
-
-    st.Rc = Rc;
-    st.OmegaC = OmegaC;
-    st.t = t;
+    u = wrenchToControl(T, tau, Rc, par);
 end
 
-function u = controllerJohnsonBeard(x, ref, t, par)
-
-    persistent st
+function u = controllerJohnsonBeard(x, ref, par)
 
     ep = x.p - ref.p;
     ev = x.v - ref.v;
@@ -980,16 +1177,7 @@ function u = controllerJohnsonBeard(x, ref, t, par)
     desiredForce = par.m*(aCmd - par.g*par.e3);
     thrustAxisForce = -desiredForce;
     [Rd, ~] = desiredAttitudeFromThrustVector(thrustAxisForce, ref.psi, par);
-
-    if isempty(st) || t <= par.dt/2 || t <= st.t
-        OmegaD = zeros(3,1);
-        OmegaDDot = zeros(3,1);
-    else
-        h = max(t - st.t, par.dt);
-        OmegaD = -LogSO3(Rd' * st.Rd)/h;
-        OmegaDPrev = Rd' * st.Rd * st.OmegaD;
-        OmegaDDot = (OmegaD - OmegaDPrev)/h;
-    end
+    [OmegaD, OmegaDDot] = geometricFeedforwardInDesiredFrame(ref, Rd, par);
 
     Rbd = x.R' * Rd;
     r = LogSO3(Rbd);
@@ -997,19 +1185,15 @@ function u = controllerJohnsonBeard(x, ref, t, par)
     omegaErr = omegaDInBody - x.Omega;
     omegaDDotInBody = Rbd * OmegaDDot - hat(x.Omega)*omegaDInBody;
 
-    Jlinv = leftJacobianSO3Inv(r);
+    Jl = leftJacobianSO3(r);
+    % Johnson and Beard Eq. (21)-(23), (29)-(32). The paper uses J_l(r)' in
+    % Eq. (32), not J_l(r)^(-T).
     tau = cross(x.Omega, par.J*x.Omega) ...
         + par.J*omegaDDotInBody ...
-        + Jlinv' * par.johnsonBeard.KR*r ...
+        + Jl' * par.johnsonBeard.KR*r ...
         + par.johnsonBeard.KOmega*omegaErr;
 
-    u.T = min(norm(desiredForce), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rd;
-
-    st.Rd = Rd;
-    st.OmegaD = OmegaD;
-    st.t = t;
+    u = wrenchToControl(norm(desiredForce), tau, Rd, par);
 end
 
 function u = controllerFaessler(x, ref, traj, t, par)
@@ -1021,9 +1205,8 @@ function u = controllerFaessler(x, ref, traj, t, par)
     % - Paper output: [c_cmd, omega_des] or [c_cmd, tau] if the platform
     %   exposes moments. This framework outputs direct [T; tau].
     % - Paper Eq. (17)-(30) compute omega_ref and omegadot_ref from jerk and
-    %   snap. The trajectory interface here exposes p/v/a/psi only, so the
-    %   same feed-forward quantities are obtained by finite-differencing the
-    %   flatness attitude map. This is the MATLAB-framework adaptation.
+    %   snap; this implementation obtains them by analytically differentiating
+    %   the same Eq. (11)-(14) flatness attitude map below.
 
     ff = faesslerFlatnessReference(traj, t, par);
 
@@ -1057,16 +1240,13 @@ function u = controllerFaessler(x, ref, traj, t, par)
 
     tau = par.J*alphaCmd + cross(x.Omega, par.J*x.Omega);
 
-    u.T = min(max(par.m*cCmd, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rd;
+    u = wrenchToControl(par.m*cCmd, tau, Rd, par);
 end
 
 function ff = faesslerFlatnessReference(traj, t, par)
 
-    ref = traj.eval(t);
-    [R, c] = faesslerFlatnessAttitude(ref, par);
-    [Omega, alpha] = faesslerFlatnessRates(traj, t, par);
+    ref = completeReferenceDerivatives(traj.eval(t));
+    [R, c, Omega, alpha] = faesslerFlatnessAttitudeDerivatives(ref, par);
 
     ff.R = R;
     ff.c = c;
@@ -1074,77 +1254,79 @@ function ff = faesslerFlatnessReference(traj, t, par)
     ff.alpha = alpha;
 end
 
-function [R, c] = faesslerFlatnessAttitude(ref, par)
+function [R, c, Omega, alpha] = faesslerFlatnessAttitudeDerivatives(ref, par)
 
-    % Faessler Eq. (7)-(14), rewritten for the current NED model:
+    % Faessler Eq. (11)-(14), plus analytic time derivatives equivalent to
+    % Eq. (17)-(30). The signs are rewritten for the benchmark NED model:
     % a = g*e3 - c*b3 - R*D*R'*v.
-    % Therefore b1 is orthogonal to alpha = g*e3 - a - dx*v, b2 is
-    % orthogonal to beta = g*e3 - a - dy*v, and
-    % c = b3'*(g*e3 - a - dz*v).
     D = par.faessler.D;
     dx = D(1,1);
     dy = D(2,2);
     dz = D(3,3);
 
+    xC = [cos(ref.psi); sin(ref.psi); 0];
     yC = [-sin(ref.psi); cos(ref.psi); 0];
+    yCDot = -ref.psiDot*xC;
+    yCDD = -ref.psiDDot*xC - ref.psiDot^2*yC;
 
-    alpha = par.g*par.e3 - ref.a - dx*ref.v;
-    beta = par.g*par.e3 - ref.a - dy*ref.v;
+    alphaVec = par.g*par.e3 - ref.a - dx*ref.v;
+    alphaDot = -ref.j - dx*ref.a;
+    alphaDDot = -ref.s - dx*ref.j;
 
-    b1Raw = cross(yC, alpha);
+    betaVec = par.g*par.e3 - ref.a - dy*ref.v;
+    betaDot = -ref.j - dy*ref.a;
+    betaDDot = -ref.s - dy*ref.j;
+
+    b1Raw = cross(yC, alphaVec);
+    b1RawDot = cross(yCDot, alphaVec) + cross(yC, alphaDot);
+    b1RawDDot = cross(yCDD, alphaVec) ...
+        + 2*cross(yCDot, alphaDot) + cross(yC, alphaDDot);
+
     if norm(b1Raw) < 1e-9
-        [R, c] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
-        c = c/par.m;
+        % Special handling: Faessler Eq. (11) is singular when y_C is
+        % parallel to alpha. Fall back to the no-drag flatness map.
+        ff = geometricFlatnessReference(ref, par);
+        R = ff.R;
+        c = ff.c;
+        Omega = ff.Omega;
+        alpha = ff.alpha;
         return;
     end
-    b1 = b1Raw/norm(b1Raw);
 
-    b2Raw = cross(beta, b1);
+    [b1, b1Dot, b1DDot] = normalizedVectorDerivatives( ...
+        b1Raw, b1RawDot, b1RawDDot);
+
+    b2Raw = cross(betaVec, b1);
+    b2RawDot = cross(betaDot, b1) + cross(betaVec, b1Dot);
+    b2RawDDot = cross(betaDDot, b1) ...
+        + 2*cross(betaDot, b1Dot) + cross(betaVec, b1DDot);
+
     if norm(b2Raw) < 1e-9
-        [R, c] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
-        c = c/par.m;
+        % Special handling: Faessler Eq. (12) is singular when beta is
+        % parallel to x_B. Fall back to the no-drag flatness map.
+        ff = geometricFlatnessReference(ref, par);
+        R = ff.R;
+        c = ff.c;
+        Omega = ff.Omega;
+        alpha = ff.alpha;
         return;
     end
-    b2 = b2Raw/norm(b2Raw);
+
+    [b2, b2Dot, b2DDot] = normalizedVectorDerivatives( ...
+        b2Raw, b2RawDot, b2RawDDot);
+
     b3 = cross(b1, b2);
-    b3 = b3/norm(b3);
+    b3Dot = cross(b1Dot, b2) + cross(b1, b2Dot);
+    b3DDot = cross(b1DDot, b2) ...
+        + 2*cross(b1Dot, b2Dot) + cross(b1, b2DDot);
 
-    R = projectSO3([b1, b2, b3]);
+    R = [b1, b2, b3];
+    RDot = [b1Dot, b2Dot, b3Dot];
+    RDDot = [b1DDot, b2DDot, b3DDot];
+
     c = dot(par.g*par.e3 - ref.a - dz*ref.v, R*par.e3);
-end
-
-function [Omega, alpha] = faesslerFlatnessRates(traj, t, par)
-
-    % Paper Eq. (17)-(30) are the analytic flatness derivatives using jerk,
-    % snap, psi_dot, and psi_ddot. The current trajectory interface only
-    % exposes p/v/a/psi, so use the same SO(3) finite-difference convention
-    % as the other paper controllers in this benchmark.
-    h = par.dt;
-    tPrev = max(t - h, 0);
-    tNext = min(t + h, par.Tend);
-
-    RNow = faesslerReferenceAttitudeOnly(traj.eval(t), par);
-
-    if tNext > t
-        RNext = faesslerReferenceAttitudeOnly(traj.eval(tNext), par);
-        Omega = LogSO3(RNow' * RNext)/(tNext - t);
-    else
-        Omega = zeros(3,1);
-    end
-
-    if t > tPrev && tNext > t
-        RPrev = faesslerReferenceAttitudeOnly(traj.eval(tPrev), par);
-        OmegaPrev = LogSO3(RPrev' * RNow)/(t - tPrev);
-        OmegaPrevAtNow = RNow' * RPrev * OmegaPrev;
-        alpha = (Omega - OmegaPrevAtNow)/(0.5*(tNext - tPrev));
-    else
-        alpha = zeros(3,1);
-    end
-end
-
-function R = faesslerReferenceAttitudeOnly(ref, par)
-
-    [R, ~] = faesslerFlatnessAttitude(ref, par);
+    Omega = vee(R' * RDot);
+    alpha = vee(R' * RDDot - hat(Omega)*hat(Omega));
 end
 
 function u = controllerTalKaraman(x, ref, traj, t, par)
@@ -1167,9 +1349,9 @@ function u = controllerTalKaraman(x, ref, traj, t, par)
     %   equivalent Rd from the INDI thrust vector and yaw; x.R'*Rd is the
     %   incremental attitude used in Eq. (28).
     % - Paper Eq. (33)-(36) motor speed inversion is intentionally omitted:
-    %   this benchmark has no control allocation layer and directly accepts
-    %   force/moment commands. Eq. (31)'s filtered moment mu_f is therefore
-    %   represented by the previous saturated equivalent moment st.tau.
+    %   this benchmark has a unified thrust-allocation layer but no rotor
+    %   speed dynamics. Eq. (31)'s filtered moment mu_f is therefore
+    %   represented by the previous allocated equivalent moment st.tau.
 
     ff = talFlatnessReference(traj, t, par);
 
@@ -1236,9 +1418,7 @@ function u = controllerTalKaraman(x, ref, traj, t, par)
 
     % Saturate first; the plant then applies these force/moment values
     % directly, and the next INDI update reuses the saturated applied values.
-    u.T = min(max(T, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rd;
+    u = wrenchToControl(T, tau, Rd, par);
 
     st.v = x.v;
     st.R = x.R;
@@ -1461,47 +1641,12 @@ end
 
 function refDer = talReferenceDerivatives(traj, t, par)
 
-    h = par.dt;
-    t0 = clampScalar(t, 0, par.Tend);
-    tm = clampScalar(t0 - h, 0, par.Tend);
-    tp = clampScalar(t0 + h, 0, par.Tend);
+    ref = completeReferenceDerivatives(traj.eval(clampScalar(t, 0, par.Tend)));
 
-    ref0 = traj.eval(t0);
-    refM = traj.eval(tm);
-    refP = traj.eval(tp);
-
-    if tp > t0 && tm < t0
-        hp = tp - t0;
-        hm = t0 - tm;
-        refDer.j = (hm^2*(refP.a - ref0.a) + hp^2*(ref0.a - refM.a))/(hp*hm*(hp + hm));
-        refDer.s = 2*(hm*refP.a - (hp + hm)*ref0.a + hp*refM.a)/(hp*hm*(hp + hm));
-        refDer.psiDot = (hm^2*angleDiff(refP.psi, ref0.psi) ...
-            + hp^2*angleDiff(ref0.psi, refM.psi))/(hp*hm*(hp + hm));
-        refDer.psiDDot = 2*(hm*angleDiff(refP.psi, ref0.psi) ...
-            - hp*angleDiff(ref0.psi, refM.psi))/(hp*hm*(hp + hm));
-    elseif tp > t0
-        hp = tp - t0;
-        refDer.j = (refP.a - ref0.a)/hp;
-        refDer.s = zeros(3,1);
-        refDer.psiDot = angleDiff(refP.psi, ref0.psi)/hp;
-        refDer.psiDDot = 0;
-    elseif tm < t0
-        hm = t0 - tm;
-        refDer.j = (ref0.a - refM.a)/hm;
-        refDer.s = zeros(3,1);
-        refDer.psiDot = angleDiff(ref0.psi, refM.psi)/hm;
-        refDer.psiDDot = 0;
-    else
-        refDer.j = zeros(3,1);
-        refDer.s = zeros(3,1);
-        refDer.psiDot = 0;
-        refDer.psiDDot = 0;
-    end
-end
-
-function d = angleDiff(a, b)
-
-    d = atan2(sin(a - b), cos(a - b));
+    refDer.j = ref.j;
+    refDer.s = ref.s;
+    refDer.psiDot = ref.psiDot;
+    refDer.psiDDot = ref.psiDDot;
 end
 
 function e = e1Local()
@@ -1516,14 +1661,10 @@ end
 
 function ff = talFlatnessReference(traj, t, par)
 
-    ref = traj.eval(t);
-    [R, T] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
-
-    ff.R = R;
-    ff.c = T/par.m;
+    ff = geometricFlatnessReference(traj.eval(t), par);
 end
 
-function u = controllerSunNMPC(x, ref, traj, t, par)
+function u = controllerSunNMPC(x, ~, traj, t, par)
 
     persistent st
 
@@ -1693,26 +1834,16 @@ function refs = sunNMPCBuildReferences(traj, t, N, h, par)
         else
             ref = traj.eval(min(tk, par.Tend));
         end
-        [Rk, Tk] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
+        ff = geometricFlatnessReference(ref, par);
 
         refs.p(:,k) = ref.p;
         refs.v(:,k) = ref.v;
-        refs.R(:,:,k) = Rk;
-        refs.q(:,k) = rotmToQuatWXYZ(Rk);
-        refs.T(k) = min(max(Tk, 0), par.Tmax);
+        refs.R(:,:,k) = ff.R;
+        refs.q(:,k) = rotmToQuatWXYZ(ff.R);
+        refs.Omega(:,k) = ff.Omega;
+        refs.alpha(:,k) = ff.alpha;
+        refs.T(k) = min(max(ff.T, 0), par.Tmax);
     end
-
-    for k = 1:N
-        refs.Omega(:,k) = LogSO3(refs.R(:,:,k)' * refs.R(:,:,k+1))/h;
-    end
-    refs.Omega(:,N+1) = refs.Omega(:,N);
-
-    for k = 1:N-1
-        omegaNextAtK = refs.R(:,:,k)' * refs.R(:,:,k+1) * refs.Omega(:,k+1);
-        refs.alpha(:,k) = (omegaNextAtK - refs.Omega(:,k))/h;
-    end
-    refs.alpha(:,N) = refs.alpha(:,max(N-1, 1));
-    refs.alpha(:,N+1) = refs.alpha(:,N);
 
     for k = 1:N+1
         refs.tau(:,k) = par.J*refs.alpha(:,k) ...
@@ -1730,66 +1861,166 @@ function xVec = sunNMPCStateVector(x)
             x.Omega];
 end
 
-function G = sunAllocationMatrix(par)
+function G = allocationMatrix(par)
 
-    tBM = par.sun.tBM;
-    kappa = par.sun.kappa;
+    tBM = par.allocation.tBM;
+    kappa = par.allocation.kappa;
     G = [ones(1,4);
          tBM(2,:);
         -tBM(1,:);
          kappa*[-1, -1, 1, 1]];
 end
 
-function uRotor = sunAllocateRotorThrusts(T, tau, par)
+function u = wrenchToControl(T, tau, Rd, par)
+
+    uRotor = allocateRotorThrusts(T, tau, par);
+    u = rotorThrustsToControl(uRotor, Rd, par);
+end
+
+function uRotor = allocateRotorThrusts(T, tau, par)
 
     mu = [T; tau(:)];
-    uRotor = sunBoundedAllocation(mu, par);
+    uRotor = allocateWrench(mu, par);
+end
+
+function uRotor = allocateWrench(mu, par)
+
+    switch par.allocation.method
+        case "wls"
+            uRotor = allocateWrenchWLS(mu, par);
+        case "pinv"
+            uRotor = allocateWrenchPinv(mu, par);
+        otherwise
+            error("Unknown allocation method.");
+    end
+end
+
+function uRotor = allocateWrenchPinv(mu, par)
+
+    G = allocationMatrix(par);
+    lb = par.allocation.uMin(:);
+    ub = par.allocation.uMax(:);
+    uRotor = min(max(pinv(G)*mu(:), lb), ub);
+end
+
+function uRotor = allocateWrenchWLS(mu, par)
+
+    % Unified WLS allocation, QCAT wls_alloc.m active-set form:
+    %   min ||Wu*(u-ud)||^2 + gamma*||Wv*(G*u-mu)||^2
+    %   s.t. uMin <= u <= uMax.
+    %
+    % Source mapping:
+    %   B=G is this benchmark's force/moment effectiveness matrix,
+    %   v=mu=[T;tau] is the commanded virtual control,
+    %   u is the 4x1 rotor thrust vector.
+    %
+    % Special handling: Wv is sqrt(par.allocation.W), because QCAT writes
+    % the cost as a squared norm while par.allocation.W is stored as the
+    % quadratic virtual-control weight. Wu=0 keeps the allocator focused on
+    % matching the wrench; actuator regularization can be added here later
+    % without changing controller code.
+    G = allocationMatrix(par);
+    Wv = diag(sqrt(diag(par.allocation.W)));
+    Wu = zeros(4);
+    ud = zeros(4,1);
+    gamma = 1;
+    lb = par.allocation.uMin(:);
+    ub = par.allocation.uMax(:);
+    u0 = min(max(pinv(G)*mu(:), lb), ub);
+    W0 = zeros(4,1);
+
+    if exist('wls_alloc', 'file') == 2
+        uRotor = wls_alloc(G, mu(:), lb, ub, Wv, Wu, ud, gamma, ...
+            u0, W0, 50);
+    else
+        % Fallback copy of the same active-set algorithm, kept only so the
+        % benchmark remains runnable if wls_alloc.m is not on the MATLAB path.
+        uRotor = boundedWLSActiveSet(G, mu(:), lb, ub, Wv, Wu, ud, gamma, ...
+            u0, W0, 50);
+    end
+end
+
+function u = boundedWLSActiveSet(B, v, umin, umax, Wv, Wu, ud, gamma, u, W, imax)
+
+    A = [sqrt(gamma)*Wv*B; Wu];
+    b = [sqrt(gamma)*Wv*v; Wu*ud];
+    d = b - A*u;
+    free = W == 0;
+
+    for iter = 1:imax
+        AFree = A(:,free);
+        pFree = AFree\d;
+        p = zeros(size(u));
+        p(free) = pFree;
+        uCandidate = u + p;
+
+        infeasible = (uCandidate < umin) | (uCandidate > umax);
+        if ~any(infeasible(free))
+            u = uCandidate;
+            d = d - AFree*pFree;
+
+            lambda = W.*(A'*d);
+            if all(lambda >= -eps)
+                u = min(max(u, umin), umax);
+                return;
+            end
+
+            [~, iRemove] = min(lambda);
+            W(iRemove) = 0;
+            free(iRemove) = true;
+        else
+            dist = ones(size(u));
+            movingLow = free & p < 0;
+            movingHigh = free & p > 0;
+            dist(movingLow) = (umin(movingLow) - u(movingLow)) ./ p(movingLow);
+            dist(movingHigh) = (umax(movingHigh) - u(movingHigh)) ./ p(movingHigh);
+
+            [alpha, iBound] = min(dist);
+            u = u + alpha*p;
+            d = d - AFree*(alpha*pFree);
+            W(iBound) = sign(p(iBound));
+            free(iBound) = false;
+        end
+    end
+
+    u = min(max(u, umin), umax);
+end
+
+function mu = rotorThrustsToWrench(uRotor, par)
+
+    uRotor = min(max(uRotor(:), par.allocation.uMin), par.allocation.uMax);
+    mu = allocationMatrix(par)*uRotor;
+end
+
+function u = rotorThrustsToControl(uRotor, Rd, par)
+
+    uRotor = min(max(uRotor(:), par.allocation.uMin), par.allocation.uMax);
+    mu = rotorThrustsToWrench(uRotor, par);
+
+    u.T = mu(1);
+    u.tau = mu(2:4);
+    u.Rd = Rd;
+    u.rotorThrusts = uRotor;
+end
+
+function G = sunAllocationMatrix(par)
+
+    G = allocationMatrix(par);
+end
+
+function uRotor = sunAllocateRotorThrusts(T, tau, par)
+
+    uRotor = allocateRotorThrusts(T, tau, par);
 end
 
 function uRotor = sunBoundedAllocation(mu, par)
 
-    sunEnsureWLSAllocPath(par);
-
-    G = sunAllocationMatrix(par);
-    Wv = diag(sqrt(diag(par.sun.W)));
-    lb = par.sun.uMin(:);
-    ub = par.sun.uMax(:);
-    u0 = min(max(G\mu(:), lb), ub);
-
-    Wu = zeros(4);
-    ud = zeros(4,1);
-    gamma = 1;
-    W0 = zeros(4,1);
-    uRotor = wls_alloc(G, mu(:), lb, ub, Wv, Wu, ud, gamma, u0, W0, 50);
-    uRotor = min(max(uRotor(:), lb), ub);
-end
-
-function sunEnsureWLSAllocPath(par)
-
-    wlsPath = char(par.sun.wlsAllocPath);
-    if exist('wls_alloc', 'file') == 2
-        return;
-    end
-
-    if exist(wlsPath, 'dir') ~= 7
-        error("QCAT wls_alloc path does not exist: %s", wlsPath);
-    end
-
-    addpath(wlsPath);
-    if exist('wls_alloc', 'file') ~= 2
-        error("wls_alloc.m was not found after adding path: %s", wlsPath);
-    end
+    uRotor = allocateWrench(mu, par);
 end
 
 function u = sunRotorThrustToControl(uRotor, Rd, par)
 
-    uRotor = min(max(uRotor(:), par.sun.uMin), par.sun.uMax);
-    mu = sunAllocationMatrix(par)*uRotor;
-
-    u.T = min(max(mu(1), 0), par.Tmax);
-    u.tau = saturateVector(mu(2:4), par.tauMax);
-    u.Rd = Rd;
-    u.rotorThrusts = uRotor;
+    u = rotorThrustsToControl(uRotor, Rd, par);
 end
 
 function u = controllerSunDFBC(x, ref, traj, t, par)
@@ -1821,7 +2052,7 @@ function u = controllerSunNMPCINDI(x, ref, traj, t, par)
     u.sunNMPCSolveTime = uMpc.sunNMPCSolveTime;
 end
 
-function cmd = sunDFBCCommand(x, ref, traj, t, par)
+function cmd = sunDFBCCommand(x, ref, ~, ~, par)
 
     % Sun et al. Eq. (13): desired acceleration from PD position feedback.
     xiErr = ref.p - x.p;
@@ -1835,11 +2066,9 @@ function cmd = sunDFBCCommand(x, ref, traj, t, par)
     [Rd, T] = desiredAttitudeFromThrustVector(thrustAxisForce, ref.psi, par);
 
     % Sun et al. Eq. (18)-(24): differential-flatness feed-forward body
-    % rates and angular acceleration. The paper's printed frame convention
-    % is ENU and effectively uses B-to-I R=[x_B,y_B,z_B]. Here the NED
-    % flatness attitude already includes the sign change in Eq. (14), so
-    % Omega_r and alpha_r are finite-differenced from that B-to-NED attitude.
-    [OmegaR, alphaR] = sunFlatnessReferenceRates(traj, t, par);
+    % rates and angular acceleration from reference jerk/snap. The NED
+    % flatness attitude already includes the sign change in Eq. (14).
+    [OmegaR, alphaR] = sunFlatnessReferenceRates(ref, Rd, par);
 
     % Sun et al. Eq. (25): for B-to-I attitude, use q_e = q^{-1} \otimes q_d
     % so the reduced/yaw tangent vectors below are body-local errors.
@@ -1873,17 +2102,22 @@ function cmd = sunDFBCCommand(x, ref, traj, t, par)
 
     tauDesired = par.J*alphaD + cross(x.Omega, par.J*x.Omega);
     rotorThrusts = sunAllocateRotorThrusts(T, tauDesired, par);
+    muAllocated = rotorThrustsToWrench(rotorThrusts, par);
 
     cmd.rotorThrusts = rotorThrusts;
-    cmd.T = T;
-    cmd.alpha = alphaD;
+    % Sun Eq. (32): after constrained allocation, retrieve the actually
+    % achievable collective thrust and angular acceleration for INDI.
+    cmd.T = muAllocated(1);
+    cmd.alpha = par.J \ (muAllocated(2:4) ...
+        - cross(x.Omega, par.J*x.Omega));
     cmd.Rd = Rd;
 end
 
 function cmd = sunCommandFromRotorThrusts(rotorThrusts, Rd, x, par)
 
-    rotorThrusts = min(max(rotorThrusts(:), par.sun.uMin), par.sun.uMax);
-    mu = sunAllocationMatrix(par)*rotorThrusts;
+    rotorThrusts = min(max(rotorThrusts(:), ...
+        par.allocation.uMin), par.allocation.uMax);
+    mu = rotorThrustsToWrench(rotorThrusts, par);
     cmd.rotorThrusts = rotorThrusts;
     cmd.T = mu(1);
     cmd.alpha = par.J \ (mu(2:4) - cross(x.Omega, par.J*x.Omega));
@@ -1927,60 +2161,116 @@ function [u, st] = sunINDIRotorControl(x, cmd, t, par, st)
     st.t = t;
 end
 
-function [OmegaR, alphaR] = sunFlatnessReferenceRates(traj, t, par)
+function [OmegaR, alphaR] = sunFlatnessReferenceRates(ref, Rd, par)
 
-    h = par.dt;
-    tPrev = max(t - h, 0);
-    tNext = min(t + h, par.Tend);
-
-    RNow = sunReferenceAttitudeOnly(traj.eval(t), par);
-
-    if tNext > t
-        RNext = sunReferenceAttitudeOnly(traj.eval(tNext), par);
-        OmegaR = LogSO3(RNow' * RNext)/(tNext - t);
-    else
-        OmegaR = zeros(3,1);
-    end
-
-    if t > tPrev && tNext > t
-        RPrev = sunReferenceAttitudeOnly(traj.eval(tPrev), par);
-        OmegaPrev = LogSO3(RPrev' * RNow)/(t - tPrev);
-        OmegaPrevAtNow = RNow' * RPrev * OmegaPrev;
-        alphaR = (OmegaR - OmegaPrevAtNow)/(0.5*(tNext - tPrev));
-    else
-        alphaR = zeros(3,1);
-    end
+    [OmegaR, alphaR] = geometricFeedforwardInDesiredFrame(ref, Rd, par);
 end
 
-function R = sunReferenceAttitudeOnly(ref, par)
+function u = controllerLuOnManifoldMPC(x, ref, traj, t, par)
 
-    [R, ~] = desiredAttitudeFromAccel(ref.a, ref.psi, par);
-end
+    % Lu et al. on-manifold MPC, quadrotor case.
+    %
+    % Paper-to-code convention:
+    %   Lu Eq. (14)-(16) uses state x=(p,v,R) in M=R3 x R3 x SO(3)
+    %   and input u=[aT; omega]. In this benchmark R maps body to NED, so
+    %   the same model form is
+    %       p_dot = v,
+    %       v_dot = g*e3 - aT*R*e3,
+    %       R_dot = R*hat(omega).
+    %
+    %   The MPC variable is the input error delta u = u - u_d from Lu
+    %   Eq. (13). Therefore the command below is
+    %       [aT_cmd; Omega_cmd] = [aT_d; Omega_d] + delta u_0.
+    %
+    %   Special handling: Lu's experiment sends aT and body-rate omega to a
+    %   PX4 rate controller. This benchmark plant accepts force/moment, so
+    %   luMpcRateLoop adapts Omega_cmd to tau before the unified allocator.
+    [Rd, aTd, OmegaD] = referenceInputOnManifold(ref, par);
 
-function u = controllerLuOnManifoldLQR(x, ref, traj, t, par)
+    refs = onManifoldMPCReferences(ref, traj, t, par);
+    du = solveOnManifoldMPC(x, refs, par);
 
-    [Rd, aTd, OmegaD] = referenceInputOnManifold(ref, traj, t, par);
-
-    e = [x.p - ref.p;
-         x.v - ref.v;
-         LogSO3(Rd' * x.R)];
-
-    [Ad, Bd] = linearizedQuadrotorErrorModel(Rd, aTd, par);
-    K = finiteHorizonLQR(Ad, Bd, par.mpc.Q, par.mpc.R, par.mpc.P, par.mpc.N);
-
-    du = -K*e;
     aTCmd = aTd + du(1);
     OmegaCmd = OmegaD + du(2:4);
-
     aTCmd = min(max(aTCmd, 0), par.Tmax/par.m);
     OmegaCmd = saturateVector(OmegaCmd, par.mpc.omegaMax);
 
-    tau = cross(x.Omega, par.J*x.Omega) ...
-        + par.mpc.KOmega*(OmegaCmd - x.Omega);
+    % Lu Eq. (14)-(16) outputs thrust acceleration and body rate. This
+    % benchmark plant accepts force/moment, so Omega_cmd is adapted through
+    % the configured body-rate loop before unified actuator allocation.
+    tau = luMpcRateLoop("compute", x, OmegaCmd, t, par, []);
+    u = wrenchToControl(par.m*aTCmd, tau, Rd, par);
+    luMpcRateLoop("commit", x, OmegaCmd, t, par, u);
+end
 
-    u.T = par.m*aTCmd;
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rd;
+function tau = luMpcRateLoop(action, x, OmegaCmd, t, par, uApplied)
+
+    persistent st
+
+    tau = zeros(3,1);
+
+    switch string(action)
+        case "compute"
+            resetState = isempty(st) || ~isfield(st, 't') ...
+                || t <= par.dt/2 || t <= st.t;
+            if resetState
+                st.t = t - par.dt;
+                st.Omega = x.Omega;
+                st.eOmega = zeros(3,1);
+                st.eInt = zeros(3,1);
+                st.tau = cross(x.Omega, par.J*x.Omega);
+            end
+
+            h = max(t - st.t, par.dt);
+            eOmega = OmegaCmd - x.Omega;
+            eInt = min(max(st.eInt + h*eOmega, ...
+                -par.mpc.rate.integralLimit), par.mpc.rate.integralLimit);
+            eDot = (eOmega - st.eOmega)/h;
+            gyro = cross(x.Omega, par.J*x.Omega);
+
+            switch par.mpc.rateController
+                case "p"
+                    % Lu MPC gives body-rate input. P mode is the minimal
+                    % paper-to-plant adaptation: rate error directly to moment.
+                    tau = gyro + par.mpc.rate.Kp*eOmega;
+
+                case "pid"
+                    % Special handling: derivative is taken on rate error
+                    % because the reference body-rate derivative is not an MPC
+                    % decision variable in Lu Eq. (14)-(16).
+                    tau = gyro + par.mpc.rate.Kp*eOmega ...
+                        + par.mpc.rate.Ki*eInt + par.mpc.rate.Kd*eDot;
+
+                case "indi"
+                    % Special handling: INDI increments from the previous
+                    % allocated moment, so actuator saturation in the unified
+                    % allocation layer is reflected on the next update.
+                    omegaDotCmd = par.mpc.rate.indiK*eOmega;
+                    if resetState
+                        tau = gyro + par.J*omegaDotCmd;
+                    else
+                        omegaDotEst = (x.Omega - st.Omega)/h;
+                        tau = st.tau + par.J*(omegaDotCmd - omegaDotEst);
+                    end
+            end
+
+            st.pendingEOmega = eOmega;
+            st.pendingEInt = eInt;
+
+        case "commit"
+            if isempty(st) || isempty(uApplied)
+                return;
+            end
+
+            st.Omega = x.Omega;
+            st.eOmega = getStructField(st, 'pendingEOmega', OmegaCmd - x.Omega);
+            st.eInt = getStructField(st, 'pendingEInt', st.eInt);
+            st.tau = uApplied.tau;
+            st.t = t;
+
+        otherwise
+            error("Unknown Lu MPC rate-loop action.");
+    end
 end
 
 function u = controllerGeometricINDI(x, ref, t, par)
@@ -1995,9 +2285,8 @@ function u = controllerGeometricINDI(x, ref, t, par)
         [Rd, T] = desiredAttitudeFromAccel(aCmd, ref.psi, par, x.R);
         rErr = LogSO3(x.R' * Rd);
 
-        u.T = min(max(T, 0), par.Tmax);
-        u.tau = saturateVector(par.indi.KR*rErr - par.indi.KOmega*x.Omega, par.tauMax);
-        u.Rd = Rd;
+        tau = par.indi.KR*rErr - par.indi.KOmega*x.Omega;
+        u = wrenchToControl(T, tau, Rd, par);
 
         st = updateINDIState(x, u, Rd, zeros(3,1), t);
         return;
@@ -2021,9 +2310,7 @@ function u = controllerGeometricINDI(x, ref, t, par)
 
     tau = st.tau + par.J*(OmegaDotCmd - OmegaDot0);
 
-    u.T = min(max(T, 0), par.Tmax);
-    u.tau = saturateVector(tau, par.tauMax);
-    u.Rd = Rd;
+    u = wrenchToControl(T, tau, Rd, par);
 
     st = updateINDIState(x, u, Rd, OmegaR, t);
 end
@@ -2040,59 +2327,339 @@ function st = updateINDIState(x, u, Rd, OmegaR, t)
     st.t = t;
 end
 
-function [Rd, aT, OmegaD] = referenceInputOnManifold(ref, traj, t, par, h)
+function [Rd, aT, OmegaD] = referenceInputOnManifold(ref, par)
 
-    if nargin < 5
-        h = par.dt;
-    end
+    % Reference input u_d=[aT_d; Omega_d] for Lu Eq. (15b).
+    % aT_d is collective thrust acceleration, and Omega_d is the body-rate
+    % feed-forward recovered from the analytic flat-output derivatives.
+    ff = geometricFlatnessReference(ref, par);
 
-    [Rd, T] = desiredAttitudeFromAccel(ref.a, ref.psi, par, eye(3));
-    aT = T/par.m;
+    Rd = ff.R;
+    aT = ff.T/par.m;
+    OmegaD = ff.Omega;
+end
 
-    tNext = min(t + h, par.Tend);
-    refNext = traj.eval(tNext);
-    [RdNext, ~] = desiredAttitudeFromAccel(refNext.a, refNext.psi, par, eye(3));
+function refs = onManifoldMPCReferences(ref, traj, t, par)
 
-    if tNext > t
-        OmegaD = LogSO3(Rd' * RdNext)/(tNext - t);
-    else
-        OmegaD = zeros(3,1);
+    % Build the reference sequence x_d(k), u_d(k) used in Lu Eq. (6) and
+    % Eq. (13). The reference trajectory is evaluated analytically where the
+    % factory provides derivatives; no finite-difference reference rates are
+    % introduced here.
+    N = par.mpc.N;
+    refs.p = zeros(3, N + 1);
+    refs.v = zeros(3, N + 1);
+    refs.R = zeros(3, 3, N + 1);
+    refs.aT = zeros(1, N + 1);
+    refs.Omega = zeros(3, N + 1);
+
+    ff0 = geometricFlatnessReference(ref, par);
+    refs.p(:,1) = ref.p;
+    refs.v(:,1) = ref.v;
+    refs.R(:,:,1) = ff0.R;
+    refs.aT(1) = ff0.c;
+    refs.Omega(:,1) = ff0.Omega;
+
+    for k = 2:N+1
+        tk = t + (k-1)*par.dt;
+        if isfield(traj, 'evalPredict')
+            refK = traj.evalPredict(tk);
+        else
+            refK = traj.eval(min(tk, par.Tend));
+        end
+
+        ff = geometricFlatnessReference(refK, par);
+        refs.p(:,k) = refK.p;
+        refs.v(:,k) = refK.v;
+        refs.R(:,:,k) = ff.R;
+        refs.aT(k) = ff.c;
+        refs.Omega(:,k) = ff.Omega;
     end
 end
 
-function [Ad, Bd] = linearizedQuadrotorErrorModel(Rd, aTd, par, h)
+function du0 = solveOnManifoldMPC(x, refs, par)
 
-    if nargin < 4
-        h = par.dt;
+    % Lu Eq. (13): standard Euclidean MPC over error coordinates.
+    %
+    % Error-state definition, matching Eq. (13):
+    %   delta x = x boxminus x_d
+    %           = [p-p_d; v-v_d; Log(R_d' R)] in this benchmark.
+    % The right attitude error is consistent with the SO(3) boxplus
+    % R = R_d Exp(delta theta) used by the linearization below.
+    %
+    % Input-error definition:
+    %   delta u = u - u_d = [aT-aT_d; Omega-Omega_d].
+    %
+    % Linearized error dynamics, Lu Eq. (9):
+    %   delta x_{k+1} = A_k delta x_k + B_k delta u_k.
+    %
+    % Condensed prediction:
+    %   delta X = Hx*delta x_0 + Mu*delta U,
+    % where delta X stacks k=1..N and delta U stacks k=0..N-1.
+    %
+    % Condensed cost from Lu Eq. (13):
+    %   sum ||delta x_k||_Q^2 + ||delta u_k||_R^2 + ||delta x_N||_P^2
+    % becomes
+    %   min_deltaU 0.5*deltaU' H deltaU + f' deltaU
+    % with the irrelevant global factor of two dropped:
+    %   H = Mu' Qbar Mu + Rbar,
+    %   f = Mu' Qbar Hx delta x_0.
+    %
+    % Bounds are exactly Lu Eq. (13):
+    %   u_min - u_d(k) <= delta u_k <= u_max - u_d(k).
+    N = par.mpc.N;
+    nx = 9;
+    nu = 4;
+    h = par.dt;
+
+    dx0 = [x.p - refs.p(:,1);
+           x.v - refs.v(:,1);
+           LogSO3(refs.R(:,:,1)' * x.R)];
+
+    Hx = zeros(nx*N, nx);
+    Mu = zeros(nx*N, nu*N);
+    Aseq = zeros(nx, nx, N);
+    Bseq = zeros(nx, nu, N);
+
+    for k = 1:N
+        [Aseq(:,:,k), Bseq(:,:,k)] = onManifoldMPCLinearization( ...
+            refs.R(:,:,k), refs.aT(k), refs.Omega(:,k), h, par);
     end
 
-    Ac = zeros(9,9);
-    Bc = zeros(9,4);
+    Aprod = eye(nx);
+    for i = 1:N
+        Aprod = Aseq(:,:,i)*Aprod;
+        Hx((i-1)*nx+1:i*nx,:) = Aprod;
 
-    Ac(1:3,4:6) = eye(3);
-    Ac(4:6,7:9) = aTd*Rd*hat(par.e3);
+        for j = 1:i
+            Aj = eye(nx);
+            for l = j+1:i
+                Aj = Aseq(:,:,l)*Aj;
+            end
+            Mu((i-1)*nx+1:i*nx, (j-1)*nu+1:j*nu) = Aj*Bseq(:,:,j);
+        end
+    end
 
-    Bc(4:6,1) = -Rd*par.e3;
-    Bc(7:9,2:4) = eye(3);
+    Qbar = kron(eye(N), par.mpc.Q);
+    Qbar(end-nx+1:end, end-nx+1:end) = par.mpc.P;
+    Rbar = kron(eye(N), par.mpc.R);
 
-    Ad = eye(9) + h*Ac;
-    Bd = h*Bc;
+    H = Mu'*Qbar*Mu + Rbar;
+    f = Mu'*Qbar*Hx*dx0;
+
+    [lb, ub] = onManifoldMPCInputBounds(refs, par);
+    du = solveBoxQP(H, f, lb, ub, par.mpc.maxQPIt, par.mpc.qpTol);
+    du0 = du(1:nu);
 end
 
-function K = finiteHorizonLQR(A, B, Q, R, P, N)
+function [Ad, Bd] = onManifoldMPCLinearization(Rd, aTd, OmegaD, h, par)
 
-    K = zeros(size(B,2), size(A,1));
+    % Lu Eq. (10)-(12): A_k = Gx + dt*Gf*df/d(delta x),
+    %                    B_k = dt*Gf*df/d(delta u).
+    %
+    % Manifold-specific part for M=R3 x R3 x SO(3):
+    %   R3 position and velocity blocks have Gx=Gf=I.
+    %   SO(3) uses Appendix Eq. (23) with v=dt*Omega_d:
+    %       Gx_R = Exp(-v),
+    %       Gf_R = A(v)' = leftJacobianSO3(v)'.
+    %
+    % System-specific part from Lu Eq. (16), adapted to this benchmark's
+    % body-to-NED R and v_dot = g*e3 - aT*R*e3:
+    %   df/d(delta x) =
+    %       [0 I 0;
+    %        0 0 aT*R*hat(e3);
+    %        0 0 0],
+    %   df/d(delta u) =
+    %       [0 0;
+    %        -R*e3 0;
+    %        0 I].
+    %
+    % The sign aT*R*hat(e3) follows from R=R_d Exp(delta theta):
+    % d[-aT*R*e3]/d(delta theta) at zero = aT*R*hat(e3).
+    nx = 9;
+    phi = h*OmegaD;
+    Gx = eye(nx);
+    Gf = eye(nx);
+    Gx(7:9,7:9) = expm(-hat(phi));
+    Gf(7:9,7:9) = leftJacobianSO3(phi)';
 
-    for k = N:-1:1
-        S = R + B'*P*B;
-        K = S\(B'*P*A);
-        P = Q + A'*P*A - A'*P*B*K;
+    dfdx = zeros(nx, nx);
+    dfdu = zeros(nx, 4);
+    dfdx(1:3,4:6) = eye(3);
+    dfdx(4:6,7:9) = aTd*Rd*hat(par.e3);
+    dfdu(4:6,1) = -Rd*par.e3;
+    dfdu(7:9,2:4) = eye(3);
+
+    Ad = Gx + h*Gf*dfdx;
+    Bd = h*Gf*dfdu;
+end
+
+function [lb, ub] = onManifoldMPCInputBounds(refs, par)
+
+    % Lu Eq. (13) input-error set delta U_k. The physical command bounds
+    % are on u=[aT;Omega], so the QP bounds are shifted by u_d(k).
+    N = par.mpc.N;
+    nu = 4;
+    lb = zeros(nu*N,1);
+    ub = zeros(nu*N,1);
+    omegaMax = vector3(par.mpc.omegaMax);
+    uMin = [0; -omegaMax];
+    uMax = [par.Tmax/par.m; omegaMax];
+
+    for k = 1:N
+        uRef = [refs.aT(k); refs.Omega(:,k)];
+        idx = (k-1)*nu+1:k*nu;
+        lb(idx) = uMin - uRef;
+        ub(idx) = uMax - uRef;
+    end
+end
+
+function x = solveBoxQP(H, f, lb, ub, maxIt, tol)
+
+    % Solver for the bound-constrained QP in Lu Eq. (13). quadprog is used
+    % when available; the projected-gradient fallback is deterministic and
+    % keeps the benchmark runnable without extra toolboxes.
+    H = 0.5*(H + H') + 1e-9*eye(size(H));
+    if exist('quadprog', 'file') == 2
+        opts = optimoptions('quadprog', 'Display', 'off');
+        [x, ~, exitflag] = quadprog(H, f, [], [], [], [], lb, ub, [], opts);
+        if exitflag > 0
+            return;
+        end
+    end
+
+    L = max(eig(H));
+    if ~isfinite(L) || L <= 0
+        L = 1;
+    end
+    step = 1/L;
+    x = min(max(-(H\f), lb), ub);
+
+    for k = 1:maxIt
+        grad = H*x + f;
+        xNext = min(max(x - step*grad, lb), ub);
+        if norm(xNext - x, inf) < tol
+            x = xNext;
+            return;
+        end
+        x = xNext;
     end
 end
 
 %% ========================================================================
 %% Flatness attitude map layer
-function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par, RCurrent)
+function ff = geometricFlatnessReference(ref, par)
+
+    ref = completeReferenceDerivatives(ref);
+
+    % Lee Eq. (14), Johnson-Beard Eq. (19), Sun Eq. (14)-(17), in this
+    % benchmark's NED coordinates: F_b3 = m*(g*e3 - a_ref).
+    F = par.m*(par.g*par.e3 - ref.a);
+    FDot = -par.m*ref.j;
+    FDDot = -par.m*ref.s;
+
+    [R, T, Omega, alpha] = attitudeFromThrustDerivatives( ...
+        F, FDot, FDDot, ref.psi, ref.psiDot, ref.psiDDot, par);
+
+    ff.R = R;
+    ff.T = T;
+    ff.c = T/par.m;
+    ff.Omega = Omega;
+    ff.alpha = alpha;
+end
+
+function [Omega, alpha] = geometricFeedforwardInDesiredFrame(ref, Rd, par)
+
+    ff = geometricFlatnessReference(ref, par);
+
+    % Special handling for cascaded controllers: the paper feed-forward
+    % rates come from the flat-output reference, while Rd may include
+    % position feedback. Rotate the analytic reference rates into the
+    % commanded desired frame and let attitude feedback close the remainder.
+    RRefToDesired = Rd' * ff.R;
+    Omega = RRefToDesired * ff.Omega;
+    alpha = RRefToDesired * ff.alpha;
+end
+
+function [R, T, Omega, alpha] = attitudeFromThrustDerivatives( ...
+        thrustAxisForce, thrustAxisForceDot, thrustAxisForceDDot, ...
+        psi, psiDot, psiDDot, par)
+
+    if norm(thrustAxisForce) < 1e-9
+        % Special handling: the flatness attitude is undefined for zero
+        % thrust-axis force. Use level hover and zero feed-forward rates.
+        thrustAxisForce = par.m*par.g*par.e3;
+        thrustAxisForceDot = zeros(3,1);
+        thrustAxisForceDDot = zeros(3,1);
+    end
+
+    [b3, b3Dot, b3DDot] = normalizedVectorDerivatives( ...
+        thrustAxisForce, thrustAxisForceDot, thrustAxisForceDDot);
+    T = norm(thrustAxisForce);
+
+    headingAxis = [cos(psi); sin(psi); 0];
+    headingAxisDot = psiDot*[-sin(psi); cos(psi); 0];
+    headingAxisDDot = psiDDot*[-sin(psi); cos(psi); 0] ...
+                    - psiDot^2*headingAxis;
+
+    b2Raw = cross(b3, headingAxis);
+    b2RawDot = cross(b3Dot, headingAxis) + cross(b3, headingAxisDot);
+    b2RawDDot = cross(b3DDot, headingAxis) ...
+        + 2*cross(b3Dot, headingAxisDot) + cross(b3, headingAxisDDot);
+
+    if norm(b2Raw) < 1e-8
+        % Special handling: yaw heading is parallel to the thrust axis.
+        % Match attitudeFromThrustDirection's fixed fallback heading and
+        % drop yaw derivatives because the yaw constraint is singular here.
+        headingAxis = [0; 1; 0];
+        headingAxisDot = zeros(3,1);
+        headingAxisDDot = zeros(3,1);
+        b2Raw = cross(b3, headingAxis);
+        b2RawDot = cross(b3Dot, headingAxis) + cross(b3, headingAxisDot);
+        b2RawDDot = cross(b3DDot, headingAxis) ...
+            + 2*cross(b3Dot, headingAxisDot) + cross(b3, headingAxisDDot);
+    end
+
+    if norm(b2Raw) < 1e-8
+        R = attitudeFromThrustDirection(b3, psi);
+        Omega = zeros(3,1);
+        alpha = zeros(3,1);
+        return;
+    end
+
+    [b2, b2Dot, b2DDot] = normalizedVectorDerivatives( ...
+        b2Raw, b2RawDot, b2RawDDot);
+    b1 = cross(b2, b3);
+    b1Dot = cross(b2Dot, b3) + cross(b2, b3Dot);
+    b1DDot = cross(b2DDot, b3) ...
+        + 2*cross(b2Dot, b3Dot) + cross(b2, b3DDot);
+
+    R = [b1, b2, b3];
+    RDot = [b1Dot, b2Dot, b3Dot];
+    RDDot = [b1DDot, b2DDot, b3DDot];
+
+    Omega = vee(R' * RDot);
+    alpha = vee(R' * RDDot - hat(Omega)*hat(Omega));
+end
+
+function [u, uDot, uDDot] = normalizedVectorDerivatives(x, xDot, xDDot)
+
+    r = norm(x);
+
+    if r < 1e-12
+        u = [1; 0; 0];
+        uDot = zeros(3,1);
+        uDDot = zeros(3,1);
+        return;
+    end
+
+    u = x/r;
+    rDot = dot(u, xDot);
+    uDot = (xDot - u*rDot)/r;
+    rDDot = dot(uDot, xDot) + dot(u, xDDot);
+    uDDot = (xDDot - u*rDDot - 2*rDot*uDot)/r;
+end
+
+function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par, ~)
 
     T_b_z = -par.m*(aCmd - par.g*par.e3); % -f_d. desired force along body z_B
 
@@ -2485,21 +3052,19 @@ function phi = LogSO3(R)
     phi = quatLogVectorWXYZ(q);
 end
 
-function Jinv = leftJacobianSO3Inv(phi)
+function Jl = leftJacobianSO3(phi)
 
     theta = norm(phi);
     Phi = hat(phi);
 
     if theta < 1e-6
-        Jinv = eye(3) - 0.5*Phi + (1/12)*Phi*Phi;
+        Jl = eye(3) + 0.5*Phi + (1/6)*Phi*Phi;
         return;
     end
 
-    x = 0.5*theta;
-    sincX = sin(x)/x;
-    A = (1 - cos(x)/sincX)/(theta^2);
-
-    Jinv = eye(3) - 0.5*Phi + A*Phi*Phi;
+    Jl = eye(3) ...
+        + (1 - cos(theta))/theta^2*Phi ...
+        + (theta - sin(theta))/theta^3*Phi*Phi;
 end
 
 function q = rotmToQuatWXYZ(R)
