@@ -20,15 +20,20 @@ trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_
 % trajNames = ["fast_circle"];
 
 % Available controllers for this comparison:
-% "geometric", "faessler", "lee", "johnson_beard"
+% "geometric", "lee", "johnson_beard", "px4_iris"
 % "sun_dfbc", "sun_dfbc_indi"
 % "lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi"
 % "geometric_indi", "tal_karaman"
-% controllerNames = ["geometric", "faessler", "lee", "johnson_beard", "sun_dfbc_indi","geometric_indi", "tal_karaman"];
+% controllerNames = ["geometric", "lee", "johnson_beard", "sun_dfbc_indi","geometric_indi", "tal_karaman"];
+
+% controllerNames = ["lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
+
 % controllerNames = ["sun_dfbc", "sun_nmpc", "sun_dfbc_indi", "sun_nmpc_indi"];
-% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal_karaman"];
-% controllerNames = ["sun_dfbc_indi", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
-controllerNames = ["lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
+
+controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal_karaman"];
+
+
+
 %% ========================================================================
 %% 1. Disturbance Settings
 

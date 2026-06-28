@@ -5,7 +5,7 @@ function animateTrajectory3D(time, log, par, traj)
     pd = log.pd;
     [poseP, poseR] = selectPoseLog(log, par.poseSource);
 
-    fig = figure('Name','3D trajectory animation');
+    fig = figure;
     ax = axes('Parent', fig);
     hold(ax, 'on');
 

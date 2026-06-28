@@ -338,8 +338,7 @@ function figureFiles = plotDisturbanceBenchmark(results, cfg, figDir)
         trajName = string(cfg.trajNames(iTraj));
         mask = results.Trajectory == trajName & results.IsFinite;
 
-        fig = figure('Color', 'w', ...
-            'Name', "disturbance benchmark: " + trajName);
+        fig = figure('Color', 'w');
 
         [xLabel, yData, groupLabel, yLabelText] = boxchartData(results, mask, cfg);
 

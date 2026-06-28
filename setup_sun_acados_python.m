@@ -14,7 +14,7 @@ end
 
 acadosDir = string(getenv("ACADOS_SOURCE_DIR"));
 if strlength(acadosDir) == 0
-    acadosDir = "/private/tmp/acados";
+    acadosDir = fullfile(getenv("HOME"), ".local", "src", "acados");
 end
 
 pe = pyenv;
@@ -58,6 +58,11 @@ if exist(tRenderer, "file") ~= 2
     fileattrib(tRenderer, "+x");
 end
 
+setenv("ACADOS_SOURCE_DIR", char(acadosDir));
+setenv("ACADOS_INSTALL_DIR", char(acadosDir));
+setenv("MPLCONFIGDIR", char(fullfile(tempdir, "matplotlib")));
+py.sys.path.insert(int32(0), char(fullfile(acadosDir, "interfaces", ...
+    "acados_template")));
 py.importlib.invalidate_caches();
 py.importlib.import_module("casadi");
 py.importlib.import_module("acados_template");
