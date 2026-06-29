@@ -42,6 +42,12 @@ function results = run_disturbance_benchmark(cfg)
     DisturbanceLevel = strings(nTotal,1);
     ForceAmpN = nan(nTotal,1);
     MomentAmpNm = nan(nTotal,1);
+    ForceAmpX_N = nan(nTotal,1);
+    ForceAmpY_N = nan(nTotal,1);
+    ForceAmpZ_N = nan(nTotal,1);
+    MomentAmpX_Nm = nan(nTotal,1);
+    MomentAmpY_Nm = nan(nTotal,1);
+    MomentAmpZ_Nm = nan(nTotal,1);
     RMSE = nan(nTotal,1);
     MeanError = nan(nTotal,1);
     P95Error = nan(nTotal,1);
@@ -72,8 +78,17 @@ function results = run_disturbance_benchmark(cfg)
                 Controller(row) = controllerName;
                 DisturbanceType(row) = string(cfg.disturbanceType);
                 DisturbanceLevel(row) = string(level.name);
-                ForceAmpN(row) = level.forceAmp;
-                MomentAmpNm(row) = level.momentAmp;
+                forceAmp = vector3Local(level.forceAmp);
+                momentAmp = vector3Local(level.momentAmp);
+
+                ForceAmpN(row) = norm(forceAmp);
+                MomentAmpNm(row) = norm(momentAmp);
+                ForceAmpX_N(row) = forceAmp(1);
+                ForceAmpY_N(row) = forceAmp(2);
+                ForceAmpZ_N(row) = forceAmp(3);
+                MomentAmpX_Nm(row) = momentAmp(1);
+                MomentAmpY_Nm(row) = momentAmp(2);
+                MomentAmpZ_Nm(row) = momentAmp(3);
 
                 override = makeDisturbanceOverride( ...
                     trajName, controllerName, level, cfg);
@@ -110,9 +125,12 @@ function results = run_disturbance_benchmark(cfg)
     end
 
     results = table(Trajectory, Controller, DisturbanceType, ...
-        DisturbanceLevel, ForceAmpN, MomentAmpNm, RMSE, MeanError, ...
-        P95Error, MaxError, FinalError, EvalStartS, EvalEndS, FullEndS, ...
-        NumErrorSamples, ErrorTrace, IsFinite, ErrorMessage);
+        DisturbanceLevel, ForceAmpN, MomentAmpNm, ...
+        ForceAmpX_N, ForceAmpY_N, ForceAmpZ_N, ...
+        MomentAmpX_Nm, MomentAmpY_Nm, MomentAmpZ_Nm, ...
+        RMSE, MeanError, P95Error, MaxError, FinalError, ...
+        EvalStartS, EvalEndS, FullEndS, NumErrorSamples, ErrorTrace, ...
+        IsFinite, ErrorMessage);
 
     figureFiles = strings(0,1);
 
@@ -146,11 +164,17 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     if ~isfield(cfg, 'controllerNames')
         cfg.controllerNames = ["geometric", "lu_on_manifold_lqr", "geometric_indi"];
     end
+    cfg.trajNames = string(cfg.trajNames);
+    cfg.controllerNames = string(cfg.controllerNames);
     if ~isfield(cfg, 'levels')
         cfg.levels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {0.05,  0.15,     0.30}, ...
-            'momentAmp',{0.002, 0.006,    0.012});
+            'forceAmp', {[0.05; 0.05; 0.03], ...
+                         [0.15; 0.15; 0.08], ...
+                         [0.30; 0.30; 0.12]}, ...
+            'momentAmp',{[0.002; 0.002; 0.0005], ...
+                         [0.006; 0.006; 0.0015], ...
+                         [0.012; 0.012; 0.0030]});
     end
     if ~isfield(cfg, 'disturbanceType')
         cfg.disturbanceType = "sin";
@@ -218,38 +242,14 @@ function override = makeDisturbanceOverride(trajName, controllerName, level, cfg
 
     override.disturbance.enabled = true;
     override.disturbance.type = cfg.disturbanceType;
-    override.disturbance.forceAmp = directedAmplitude( ...
-        level.forceAmp, cfg, 'forceDirection');
-    override.disturbance.momentAmp = directedAmplitude( ...
-        level.momentAmp, cfg, 'momentDirection');
+    override.disturbance.forceAmp = vector3Local(level.forceAmp);
+    override.disturbance.momentAmp = vector3Local(level.momentAmp);
     override.disturbance.startTime = cfg.disturbanceStartTime;
     override.disturbance.endTime = cfg.disturbanceEndTime;
-    if isfield(cfg, 'forceFreq')
-        override.disturbance.forceFreq = cfg.forceFreq;
-    end
-    if isfield(cfg, 'momentFreq')
-        override.disturbance.momentFreq = cfg.momentFreq;
-    end
+    override.disturbance.forceFreq = cfg.forceFreq;
+    override.disturbance.momentFreq = cfg.momentFreq;
     override.disturbance.forcePhase = cfg.forcePhase;
     override.disturbance.momentPhase = cfg.momentPhase;
-end
-
-function amp = directedAmplitude(nominalAmp, cfg, directionField)
-
-    amp = nominalAmp;
-
-    if ~isfield(cfg, directionField) || isempty(cfg.(directionField))
-        return;
-    end
-
-    direction = vector3Local(cfg.(directionField));
-    directionNorm = norm(direction);
-
-    if directionNorm < eps
-        amp = zeros(3,1);
-    else
-        amp = nominalAmp*direction/directionNorm;
-    end
 end
 
 function v = vector3Local(x)
@@ -402,8 +402,17 @@ function txt = amplitudeSummaryText(levels)
 
     parts = strings(1, numel(levels));
     for i = 1:numel(levels)
-        parts(i) = sprintf('%s: %.3g N / %.3g N*m', ...
-            string(levels(i).name), levels(i).forceAmp, levels(i).momentAmp);
+        forceAmp = vector3Local(levels(i).forceAmp);
+        momentAmp = vector3Local(levels(i).momentAmp);
+        parts(i) = sprintf('%s: F=%s N, M=%s N*m', ...
+            string(levels(i).name), amplitudeVectorText(forceAmp), ...
+            amplitudeVectorText(momentAmp));
     end
     txt = strjoin(parts, ', ');
+end
+
+function txt = amplitudeVectorText(amp)
+
+    amp = amp(:);
+    txt = sprintf('[%.3g %.3g %.3g]', amp(1), amp(2), amp(3));
 end

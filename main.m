@@ -119,7 +119,7 @@ par.johnson.We = diag([22.0, 22.0, 355.0, ...
                              2.3, 2.3, 27.0, ...
                              1e-3, 1e-3, 0.1]);
 par.johnson.Wf = diag([0.1, 0.1, 1.0]);
-par.johnson.positionGainMode = "pd";  % "pd" aligns gains; "lqr" uses We/Wf.
+par.johnson.positionGainMode = "lqr";  % "pd" aligns gains; "lqr" uses We/Wf.
 par.johnson.Kp = par.Kp;
 par.johnson.Kv = par.Kv;
 par.johnson.Ki = zeros(3);
@@ -248,23 +248,25 @@ par.geometric_indi.Komega = par.KOmegaAccel;
 % tunable.
 par.tal.Kp = par.Kp;                     % Eq. (17), position term
 par.tal.Kv = par.Kv;                     % Eq. (17), velocity term
-par.tal.Ka = 0.3*eye(3);                 % Eq. (17), acceleration term
+par.tal.Ka = 0.0*eye(3);                 % Eq. (17), acceleration term
 % Eq. (28), attitude error and angular-rate terms.
 par.tal.Ktheta = par.KRAccel;
 par.tal.Komega = par.KOmegaAccel;
 % Fig. 4: identical second-order Butterworth LPFs, 30 Hz cutoff.
 par.tal.filterCutoffHz = 30;
 
-% Additive plant disturbances. The force disturbance is expressed in inertial
-% NED coordinates [N]; the moment disturbance is expressed in the body frame
-% [N*m], matching the plant translational and rotational equations below.
-% The default is disabled, so normal single-run behavior is unchanged.
-par.disturbance.enabled = true;
-par.disturbance.type = "sin";       % "none", "constant", or "sin"
-par.disturbance.forceAmp = 0;        % scalar or 3x1 per-axis amplitude [N]
-par.disturbance.momentAmp = 0;       % scalar or 3x1 per-axis amplitude [N*m]
-par.disturbance.forceFreq = [0.31; 0.47; 0.61];   % sinusoid frequencies [Hz]
-par.disturbance.momentFreq = [0.43; 0.59; 0.73];  % sinusoid frequencies [Hz]
+% Additive plant disturbances. Set enabled=false for the no-disturbance
+% baseline. When enabled, type must be "constant" or "sin".
+% The force disturbance is expressed in inertial NED coordinates [N]; the
+% moment disturbance is expressed in the body frame [N*m].
+par.disturbance.enabled = false;
+par.disturbance.type = "sin";
+% Disturbance amplitudes are explicit per-axis 3x1 vectors. Yaw torque
+% should stay much smaller than roll/pitch.
+par.disturbance.forceAmp = [0.55; 0.55; 0.3];      % [Fx; Fy; Fz] amplitude [N]
+par.disturbance.momentAmp = [0.2; 0.2; 0.014];     % [Mx; My; Mz] amplitude [N*m]
+par.disturbance.forceFreq = [0.17; 0.23; 0.31];   % sinusoid frequencies [Hz]
+par.disturbance.momentFreq = [0.19; 0.29; 0.37];  % sinusoid frequencies [Hz]
 par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
 par.disturbance.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
 par.disturbance.startTime = 0;
@@ -944,38 +946,32 @@ function [forceDist, momentDist] = disturbanceAtTime(t, par)
     forceDist = zeros(3,1);
     momentDist = zeros(3,1);
 
-    if ~isfield(par, 'disturbance') || ~par.disturbance.enabled
+    if ~par.disturbance.enabled
         return;
     end
 
     d = par.disturbance;
-    distType = string(getStructField(d, 'type', "none"));
 
-    startTime = double(getStructField(d, 'startTime', 0));
-    endTime = double(getStructField(d, 'endTime', inf));
-    if t < startTime || t > endTime
+    if t < d.startTime || t > d.endTime
         return;
     end
 
-    forceAmp = vector3(getStructField(d, 'forceAmp', 0));
-    momentAmp = vector3(getStructField(d, 'momentAmp', 0));
+    forceAmp = vector3(d.forceAmp);
+    momentAmp = vector3(d.momentAmp);
 
-    switch distType
+    switch string(d.type)
         case "constant"
             forceDist = forceAmp;
             momentDist = momentAmp;
 
         case "sin"
-            forceFreq = vector3(getStructField(d, 'forceFreq', [0.31; 0.47; 0.61]));
-            momentFreq = vector3(getStructField(d, 'momentFreq', [0.43; 0.59; 0.73]));
-            forcePhase = vector3(getStructField(d, 'forcePhase', zeros(3,1)));
-            momentPhase = vector3(getStructField(d, 'momentPhase', zeros(3,1)));
+            forceFreq = vector3(d.forceFreq);
+            momentFreq = vector3(d.momentFreq);
+            forcePhase = vector3(d.forcePhase);
+            momentPhase = vector3(d.momentPhase);
 
             forceDist = forceAmp .* sin(2*pi*forceFreq*t + forcePhase);
             momentDist = momentAmp .* sin(2*pi*momentFreq*t + momentPhase);
-
-        case "none"
-            return;
 
         otherwise
             error("Unknown disturbance type.");
@@ -1008,14 +1004,10 @@ end
 
 function v = vector3(x)
 
-    if isscalar(x)
-        v = repmat(x, 3, 1);
-    else
-        v = x(:);
-    end
+    v = x(:);
 
     if numel(v) ~= 3
-        error("Value must be scalar or 3x1.");
+        error("Value must be 3x1.");
     end
 end
 
@@ -2125,15 +2117,16 @@ end
 
 function [omegaRef, alphaRef] = talPaperFlatnessFeedforward(R, tauSpec, refDer, par)
 
-    % Tal Eq. (14)-(15). The 4x4 matrix solves for [tau_dot; omega_ref] and
-    % [tau_ddot; omega_dot_ref] from reference jerk, snap, yaw rate, and yaw
-    % acceleration, using Eq. (11)-(13)'s yaw-rate row.
+    % Tal Eq. (14)-(15). The paper's 4x4 matrix solves for
+    % [omega_ref; tau_dot] and [omega_dot_ref; tau_ddot] from reference
+    % jerk, snap, yaw rate, and yaw acceleration, using Eq. (11)-(13)'s
+    % yaw-rate row.
     A = talFlatnessMatrix(R, tauSpec);
 
     yJerk = [refDer.j; refDer.psiDot];
     solJerk = A\yJerk;
-    tauDotRef = solJerk(1);
-    omegaRef = solJerk(2:4);
+    omegaRef = solJerk(1:3);
+    tauDotRef = solJerk(4);
 
     omegaHat = hat(omegaRef);
     knownSnap = R*(2*tauDotRef*omegaHat + tauSpec*omegaHat*omegaHat)*par.e3;
@@ -2142,17 +2135,20 @@ function [omegaRef, alphaRef] = talPaperFlatnessFeedforward(R, tauSpec, refDer, 
              refDer.psiDDot - sDotOmega];
 
     solSnap = A\ySnap;
-    alphaRef = solSnap(2:4);
+    alphaRef = solSnap(1:3);
 end
 
 function A = talFlatnessMatrix(R, tauSpec)
 
-    % Tal Eq. (14): j = R*[tau_dot*e3 + tau*hat(omega)*e3],
-    % psi_dot = S(R)*omega.
+    % Tal Eq. (14), in the same column order as the paper:
+    %   [omega_ref; tau_dot_ref] =
+    %       [tau*R*hat(e3)'  b3; S  0] \ [j_ref; psi_dot_ref].
+    % Since hat(e3)' = -hat(e3), the upper-left block is
+    % -tau*R*hat(e3).
     b3 = R*[0; 0; 1];
     S = talYawSRow(R);
-    A = [b3, -tauSpec*R*hat([0; 0; 1]);
-         0,  S];
+    A = [-tauSpec*R*hat([0; 0; 1]), b3;
+          S,                         0];
 end
 
 function S = talYawSRow(R)

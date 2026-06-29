@@ -15,22 +15,22 @@ clear; clc; close all;
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-trajNames = ["figure8_horizontal", "figure8_vertical", ...
-    "helix_flip", "flip_loop_sine", "fast_circle"];
-% trajNames = ["fast_circle"];
+% trajNames = ["figure8_horizontal", "figure8_vertical", ...
+%     "helix_flip", "flip_loop_sine", "fast_circle"];
+trajNames = ["helix_flip"];
 
 % Available controllers for this comparison:
 % "geometric", "lee", "johnson"
 % "sun_nmpc", "sun_dfbc"
 % "sun_nmpc_indi", "sun_dfbc_indi"
 % "lu", "geometric_indi", "tal"
-controllerNames = ["geometric", "lee", "johnson", ...
-    "sun_nmpc", "sun_dfbc", ...
-    "sun_nmpc_indi", "sun_dfbc_indi", ...
-    "lu", "tal", "geometric_indi"];
+% controllerNames = ["geometric", "lee", "johnson", ...
+%     "sun_nmpc", "sun_dfbc", ...
+%     "sun_nmpc_indi", "sun_dfbc_indi", ...
+%     "lu", "tal", "geometric_indi"];
 
 % Optional focused subsets:
-% controllerNames = [ "lu"];
+controllerNames = ["lu"];
 % controllerNames = ["sun_dfbc", "sun_nmpc", "sun_dfbc_indi", "sun_nmpc_indi"];
 % controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal"];
 % controllerNames = ["lu", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
@@ -49,22 +49,24 @@ disturbanceCase = "combined_sine";
 
 switch disturbanceCase
     case "combined_sine"
-        % Zero-mean force/moment disturbances for general robustness sweeps.
-        % Keep moment on body x/y rather than yaw; yaw authority is much
-        % smaller and should be tested separately if desired.
+        % Zero-mean per-axis force/moment disturbances for general robustness
+        % sweeps. Yaw moment is intentionally much smaller: Iris yaw authority
+        % is far lower than roll/pitch authority.
         disturbanceType = "sin";
         disturbanceStartTime = 0.0;
         disturbanceEndTime = inf;
-        forceDirection = [1; 0; 0];
-        momentDirection = [1; 1; 0];
         forceFreq = [0.17; 0.23; 0.31];
         momentFreq = [0.19; 0.29; 0.37];
-        forcePhase = [0; 2*pi/3; 4*pi/3];
+        forcePhase = [0; 1*pi/3; 2*pi/3];
         momentPhase = [pi/4; 3*pi/4; 5*pi/4];
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {0.2,   0.5,      0.7}, ...
-            'momentAmp',{0.2,   0.5,      0.7});
+            'forceAmp', {[0.15; 0.15; 0.1], ...
+                         [0.35; 0.35; 0.2], ...
+                         [0.55; 0.55; 0.3]}, ...
+            'momentAmp',{[0.080; 0.080; 0.006], ...
+                         [0.140; 0.140; 0.010], ...
+                         [0.2; 0.2; 0.014]});
 
     case "legacy_bias"
         % The older benchmark style: zero frequency and pi/2 phase make the
@@ -72,48 +74,54 @@ switch disturbanceCase
         disturbanceType = "sin";
         disturbanceStartTime = 0.0;
         disturbanceEndTime = inf;
-        forceDirection = [0; 1; 0];
-        momentDirection = [0; 0; 1];
         forceFreq = [0; 0; 0];
         momentFreq = [0; 0; 0];
         forcePhase = [pi/2; pi/2; pi/2];
         momentPhase = [pi/2; pi/2; pi/2];
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {0.0,   0.031,    0.061}, ...
-            'momentAmp',{0.0,   0.031,    0.061});
+            'forceAmp', {[0; 0; 0], ...
+                         [0; 0.031; 0], ...
+                         [0; 0.061; 0]}, ...
+            'momentAmp',{[0; 0; 0], ...
+                         [0; 0; 0.031], ...
+                         [0; 0; 0.061]});
 
     case "paper_force"
         % Sun et al.: constant external forces along inertial x_I.
         disturbanceType = "constant";
         disturbanceStartTime = 5.0;
         disturbanceEndTime = 10.0;
-        forceDirection = [1; 0; 0];
-        momentDirection = [0; 0; 0];
         forceFreq = [0; 0; 0];
         momentFreq = [0; 0; 0];
         forcePhase = [0; 0; 0];
         momentPhase = [0; 0; 0];
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {5,     10,       15}, ...
-            'momentAmp',{0,     0,        0});
+            'forceAmp', {[5; 0; 0], ...
+                         [10; 0; 0], ...
+                         [15; 0; 0]}, ...
+            'momentAmp',{[0; 0; 0], ...
+                         [0; 0; 0], ...
+                         [0; 0; 0]});
 
     case "paper_moment"
         % Sun et al.: external torques along body x_B and y_B, not yaw.
         disturbanceType = "constant";
         disturbanceStartTime = 5.0;
         disturbanceEndTime = 10.0;
-        forceDirection = [0; 0; 0];
-        momentDirection = [1; 1; 0];
         forceFreq = [0; 0; 0];
         momentFreq = [0; 0; 0];
         forcePhase = [0; 0; 0];
         momentPhase = [0; 0; 0];
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {0,     0,        0}, ...
-            'momentAmp',{0.1,   0.2,      0.3});
+            'forceAmp', {[0; 0; 0], ...
+                         [0; 0; 0], ...
+                         [0; 0; 0]}, ...
+            'momentAmp',{[0.0707; 0.0707; 0], ...
+                         [0.1414; 0.1414; 0], ...
+                         [0.2121; 0.2121; 0]});
 
     otherwise
         error("Unknown disturbanceCase.");
@@ -151,8 +159,6 @@ cfg.levels = disturbanceLevels;
 cfg.disturbanceType = disturbanceType;
 cfg.disturbanceStartTime = disturbanceStartTime;
 cfg.disturbanceEndTime = disturbanceEndTime;
-cfg.forceDirection = forceDirection;
-cfg.momentDirection = momentDirection;
 cfg.forceFreq = forceFreq;
 cfg.momentFreq = momentFreq;
 cfg.forcePhase = forcePhase;
