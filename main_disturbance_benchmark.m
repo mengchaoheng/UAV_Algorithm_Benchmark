@@ -21,19 +21,19 @@ trajNames = ["figure8_horizontal", "figure8_vertical", ...
 
 % Available controllers for this comparison:
 % "geometric", "lee", "johnson"
-% "sun_nmpc", "sun_dfbc"
-% "sun_nmpc_indi", "sun_dfbc_indi"
-% "lu", "geometric_indi", "tal"
+% "sun_dfbc", "sun_dfbc_indi" 
+% "sun_nmpc", "sun_nmpc_indi"
+% "lu", "tal", "geometric_indi"
 controllerNames = ["geometric", "lee", "johnson", ...
-    "sun_nmpc", "sun_dfbc", ...
-    "sun_nmpc_indi", "sun_dfbc_indi", ...
+    "sun_dfbc", "sun_dfbc_indi", ...
+    "sun_nmpc", "sun_nmpc_indi", ...
     "lu", "tal", "geometric_indi"];
 
 % Optional focused subsets:
-% controllerNames = ["lu", "sun_nmpc", "sun_nmpc_indi"];
-% controllerNames = ["sun_dfbc", "sun_nmpc", "sun_dfbc_indi", "sun_nmpc_indi"];
-% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal"];
-% controllerNames = ["lu", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
+% controllerNames = ["tal", "geometric_indi"];
+% controllerNames = ["sun_dfbc", "sun_dfbc_indi", "sun_nmpc", "sun_nmpc_indi"];
+% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "tal", "geometric_indi"];
+% controllerNames = ["sun_nmpc", "sun_nmpc_indi", "lu", "tal", "geometric_indi"];
 
 
 
@@ -61,12 +61,12 @@ switch disturbanceCase
         momentPhase = [pi/4; 3*pi/4; 5*pi/4];
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {[0.15; 0.15; 0.1], ...
-                         [0.35; 0.35; 0.2], ...
-                         [0.55; 0.55; 0.3]}, ...
-            'momentAmp',{[0.080; 0.080; 0.006], ...
-                         [0.140; 0.140; 0.010], ...
-                         [0.2; 0.2; 0.014]});
+            'forceAmp', {[0.05; 0.05; 0.03], ...
+                         [0.10; 0.10; 0.06], ...
+                         [0.20; 0.20; 0.10]}, ...
+            'momentAmp',{[0.005; 0.005; 0.0005], ...
+                         [0.010; 0.010; 0.0010], ...
+                         [0.020; 0.020; 0.0020]});
 
     case "legacy_bias"
         % The older benchmark style: zero frequency and pi/2 phase make the
@@ -132,6 +132,7 @@ end
 
 % Figures are always shown after the benchmark finishes.
 % This single switch only controls whether the figures are also saved as PNG.
+makePlots = true;
 savePlots = true;
 
 %% ========================================================================
@@ -139,6 +140,11 @@ savePlots = true;
 
 % "lie_rk4" is faster for sweeps. Use "ode45" to match main.m's default.
 integratorName = "lie_rk4";
+
+% Parallelizes independent trajectory/controller/disturbance simulations.
+% Leave numWorkers empty to let MATLAB choose the pool size.
+useParallel = true;
+numWorkers = [];
 
 % Use every time sample in the boxplot. Set to 2, 5, ... to thin samples.
 errorSampleStride = 1;
@@ -164,9 +170,12 @@ cfg.momentFreq = momentFreq;
 cfg.forcePhase = forcePhase;
 cfg.momentPhase = momentPhase;
 
+cfg.makePlots = makePlots;
 cfg.savePlots = savePlots;
 
 cfg.integratorName = integratorName;
+cfg.useParallel = useParallel;
+cfg.numWorkers = numWorkers;
 cfg.errorSampleStride = errorSampleStride;
 cfg.errorEvalMode = errorEvalMode;
 

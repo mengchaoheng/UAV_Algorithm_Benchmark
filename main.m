@@ -73,7 +73,7 @@ par.progress.scaleRange = [1, 0.3];   % scale_range: start/end scale over the si
 %   "helix_flip_y"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "helix_flip";
+par.trajName = "figure8_horizontal";
 
 % One knob for all trajectory shapes. The factory below converts it into
 % periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
@@ -85,19 +85,15 @@ par.helixTurns = 5;     % geometric turns; par.progress controls timing
 % "sun_dfbc", "sun_dfbc_indi"
 % "lu", "sun_nmpc", "sun_nmpc_indi"
 % "tal", "geometric_indi"
-par.controllerName = "lu";
-% Simple controller gains
-par.Kp = diag([20, 20, 25]);
-par.Kv = diag([9, 9, 10]);
-% Attitude gains are moment gains. Keep them inertia-scaled so changing the
-% platform does not silently change the angular closed-loop dynamics.
-par.KR = 600*par.J;
-par.KOmega = 50*par.J;
-% Equivalent angular-acceleration gains. Controllers such as Sun Eq. (28),
-% Tal Eq. (28), and the geometric INDI loop command angular acceleration
-% first and multiply by J later, so they use these converted gains.
-par.KRAccel = par.J \ par.KR;
-par.KOmegaAccel = par.J \ par.KOmega;
+par.controllerName = "geometric_indi";
+% Shared acceleration-level gains, using Sun et al. Table I DFBC values as
+% the benchmark default. Kp/Kv command linear acceleration; KR/KOmega
+% command angular acceleration. Controllers that output force/moment convert
+% with m and J in their own namespace below.
+par.Kp = diag([10, 10, 10]);
+par.Kv = diag([6, 6, 6]);
+par.KR = diag([150, 150, 3]);
+par.KOmega = diag([20, 20, 8]);
 
 % Controller-specific gain namespaces. The base gains above remain as
 % convenient defaults, but controller code should use its own namespace so
@@ -109,22 +105,22 @@ par.geometric.KR = par.KR;
 par.geometric.KOmega = par.KOmega;
 
 % [1] T. Lee, M. Leok, and N. H. McClamroch, “Geometric Tracking Control of a Quadrotor UAV on SE(3),” Mar. 10, 2010, arXiv: arXiv:1003.2005. doi: 10.48550/arXiv.1003.2005.
-par.lee.Kp = par.Kp;
-par.lee.Kv = par.Kv;
-par.lee.KR = par.KR;
-par.lee.KOmega = par.KOmega;
+par.lee.Kp = par.m*par.Kp;
+par.lee.Kv = par.m*par.Kv;
+par.lee.KR = par.J*par.KR;
+par.lee.KOmega = par.J*par.KOmega;
 
 % [2] J. Johnson and R. Beard, “Globally-Attractive Logarithmic Geometric Control of a Quadrotor for Aggressive Trajectory Tracking,” Dec. 01, 2021, arXiv: arXiv:2109.07025. doi: 10.48550/arXiv.2109.07025.
 par.johnson.We = diag([22.0, 22.0, 355.0, ...
                              2.3, 2.3, 27.0, ...
                              1e-3, 1e-3, 0.1]);
 par.johnson.Wf = diag([0.1, 0.1, 1.0]);
-par.johnson.positionGainMode = "lqr";  % "pd" aligns gains; "lqr" uses We/Wf.
-par.johnson.Kp = par.Kp;
-par.johnson.Kv = par.Kv;
+par.johnson.positionGainMode = "pd";  % "pd" aligns gains; "lqr" uses We/Wf.
+par.johnson.Kp = par.m*par.Kp;
+par.johnson.Kv = par.m*par.Kv;
 par.johnson.Ki = zeros(3);
-par.johnson.Kr = par.KR;
-par.johnson.Komega = par.KOmega;
+par.johnson.Kr = par.J*par.KR;
+par.johnson.Komega = par.J*par.KOmega;
 
 % Unified actuator model and control allocation.
 % All non-PX4 controllers produce the physical wrench mu = [T; tau].
@@ -150,10 +146,9 @@ par.px4_iris.posP = [5.0; 5.0; 5.0];
 par.px4_iris.velP = [10.0; 10.0; 10.0];
 par.px4_iris.velI = [1.0; 1.0; 1.0];
 par.px4_iris.velD = [0.0; 0.0; 0.0];
-% Cascaded-gain alignment is recomputed after PX4 allocation scaling:
-% first match the rate loop to KOmega, then choose attP so
-% KOmega_eq*attP matches KR.
-par.px4_iris.attP = diag(par.KOmega \ par.KR);
+% PX4 is a unitized cascaded controller. Keep its gains in the PX4 namespace
+% instead of remapping the paper-controller acceleration gains into it.
+par.px4_iris.attP = [12.0; 12.0; 12.0];
 par.px4_iris.rateLimit = [10.0; 10.0; 4.0]; % Align cascaded PX4 rates with MPC body-rate bounds.
 par.px4_iris.rateP = [0.0400; 0.0336; 0.4221];
 par.px4_iris.rateI = [0.0; 0.0; 0.0];
@@ -191,7 +186,7 @@ par.lu.omegaMax = par.px4_iris.rateLimit;  % Always align Lu u=[aT;Omega] rate b
 % Omega_cmd to physical torque, then the normal benchmark allocation maps
 % [m*aT_cmd; tau] to actuator thrusts.
 par.lu.ratePeriod = par.control.innerPeriod; % 250 Hz body-rate adapter.
-par.lu.rateP = par.KOmega;
+par.lu.rateP = par.J*par.KOmega;
 par.lu.rateI = zeros(3);
 par.lu.rateD = zeros(3);
 par.lu.rateFF = zeros(3);
@@ -230,14 +225,15 @@ par.sun.QOmega = par.mpc.QOmega;
 par.sun.Qu = par.mpc.Qu;
 par.sun.QN = blkdiag(par.sun.Qxi, par.sun.Qv, par.sun.Qq, par.sun.QOmega);
 
+% Sun Table I, DFBC column. These are feedback/controller gains, not the
+% NMPC objective weights Qxi/Qv/Qq/QOmega above. Eq. (28) commands angular
+% acceleration alphaD, then tau = J*alphaD + Omega x J*Omega. Therefore an
+% equivalent moment gain is J*K; mapping moment gains into Eq. (28) uses J\K.
 par.sun.Kxi = par.Kp;
 par.sun.Kv = par.Kv;
-% Sun Eq. (28): these gains produce commanded angular acceleration alphaD.
-% qRed/qYaw are quaternion-vector errors, approximately half of a small
-% rotation-vector error, so the common moment gain KR maps to 2*(J\KR).
-par.sun.KqRed = diag([2*par.KRAccel(1,1), 2*par.KRAccel(2,2), 0]);
-par.sun.kqYaw = 2*par.KRAccel(3,3);
-par.sun.KOmega = par.KOmegaAccel;
+par.sun.KqRed = diag([par.KR(1,1), par.KR(2,2), 0]);
+par.sun.kqYaw = par.KR(3,3);
+par.sun.KOmega = par.KOmega;
 par.sun.omegaMax = [10; 10; 4];
 acadosSourceDir = string(getenv("ACADOS_SOURCE_DIR"));
 if strlength(acadosSourceDir) == 0
@@ -262,10 +258,8 @@ par.sun.filterCutoffHz = 12;
 % No author-specific reference namespace.
 par.geometric_indi.Kp = par.Kp;
 par.geometric_indi.Kv = par.Kv;
-par.geometric_indi.KR = par.KR;
-par.geometric_indi.KOmega = par.KOmega;
-par.geometric_indi.Ktheta = par.KRAccel;
-par.geometric_indi.Komega = par.KOmegaAccel;
+par.geometric_indi.Ktheta = par.KR;
+par.geometric_indi.Komega = par.KOmega;
 
 % [3] E. Tal and S. Karaman, “Accurate Tracking of Aggressive Quadrotor Trajectories Using Incremental Nonlinear Dynamic Inversion and Differential Flatness,” IEEE Trans. Contr. Syst. Technol., vol. 29, no. 3, pp. 1203–1218, May 2021, doi: 10.1109/tcst.2020.3001117.
 % Tal and Karaman INDI + differential-flatness controller.
@@ -276,8 +270,8 @@ par.tal.Kp = par.Kp;                     % Eq. (17), position term
 par.tal.Kv = par.Kv;                     % Eq. (17), velocity term
 par.tal.Ka = 0.0*eye(3);                 % Eq. (17), acceleration term
 % Eq. (28), attitude error and angular-rate terms.
-par.tal.Ktheta = par.KRAccel;
-par.tal.Komega = par.KOmegaAccel;
+par.tal.Ktheta = par.KR;
+par.tal.Komega = par.KOmega;
 % Fig. 4: identical second-order Butterworth LPFs, 30 Hz cutoff.
 par.tal.filterCutoffHz = 30;
 
@@ -289,8 +283,8 @@ par.disturbance.enabled = true;
 par.disturbance.type = "sin";
 % Disturbance amplitudes are explicit per-axis 3x1 vectors. Yaw torque
 % should stay much smaller than roll/pitch.
-par.disturbance.forceAmp = [0.55; 0.55; 0.3];      % [Fx; Fy; Fz] amplitude [N]
-par.disturbance.momentAmp = [0.2; 0.2; 0.014];     % [Mx; My; Mz] amplitude [N*m]
+par.disturbance.forceAmp = [0.10; 0.10; 0.06];      % [Fx; Fy; Fz] amplitude [N]
+par.disturbance.momentAmp = [0.010; 0.010; 0.001];  % [Mx; My; Mz] amplitude [N*m]
 par.disturbance.forceFreq = [0.17; 0.23; 0.31];   % sinusoid frequencies [Hz]
 par.disturbance.momentFreq = [0.19; 0.29; 0.37];  % sinusoid frequencies [Hz]
 par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
@@ -302,8 +296,8 @@ par.disturbance.endTime = inf;
 par.startOnReference = true;
 
 % 3D attitude sampling visualization
-par.poseEvery = 0.10;       % seconds
-par.bodyAxisScale = 0.5;   % meters
+par.poseEvery = 0.5;       % seconds
+par.bodyAxisScale = 0.3;   % meters
 par.poseSource = "actual";  % "actual" or "desired"
 
 % Post-simulation 3D animation
@@ -818,30 +812,17 @@ end
 
 function par = finalizePX4CascadedGains(par)
 
-    % PX4/Lu use the cascaded form
-    %   tau = Komega_eq*(Katt*eR - Omega),
-    % while Lee/Johnson use the direct small-angle form
-    %   tau = KR*eR - KOmega*Omega.
-    % controlAllocationPX4Normalized first maps normalized torque commands
-    % through B_px4_norm, then the plant applies B_px4, so
-    %   Komega_eq = S_tau*diag(rateP),
-    %   S_tau = (B_px4 / B_px4_norm)_{moment,moment}.
-    % Rule: solve the inner rate-loop gain first, then the outer attitude
-    % gain:
-    %   rateP = diag(S_tau \ KOmega),
-    %   Katt  = diag(Komega_eq \ KR).
+    % PX4 uses the unitized cascaded form
+    %   tau ~= Komega_eq*(Katt*eR - Omega),
+    % with Katt=attP and Komega_eq=S_tau*diag(rateP). This function keeps
+    % the PX4 gains as configured above and only records their equivalent
+    % physical moment gains for diagnostics.
     px4PhysicalFromNorm = par.allocation.B_px4 / par.allocation.B_px4_norm;
     torqueScale = px4PhysicalFromNorm(2:4, 2:4);
 
-    par.px4_iris.rateP = diag(torqueScale \ par.KOmega);
-    KomegaEq = torqueScale * diag(par.px4_iris.rateP);
-    par.px4_iris.attP = diag(KomegaEq \ par.KR);
-
     par.px4_iris.rateP = par.px4_iris.rateP(:);
     par.px4_iris.attP = par.px4_iris.attP(:);
-    par.px4_iris.rateI = zeros(3,1);
-    par.px4_iris.rateD = zeros(3,1);
-    par.px4_iris.rateFF = zeros(3,1);
+    KomegaEq = torqueScale * diag(par.px4_iris.rateP);
 
     par.px4_iris.normalizedTorqueScale = torqueScale;
     par.px4_iris.KOmegaEquivalent = KomegaEq;
@@ -1406,15 +1387,18 @@ function u = controllerPDGeometric(x, ref, par)
     Rd = cmd.Rd;
     Rbd = x.R' * Rd;
 
-    % Baseline geometric controller: use Johnson-style body-frame reference
-    % rate conversion, but keep a simple log-error PD moment without
-    % feed-forward angular acceleration or left-Jacobian gain shaping.
+    % Non-INDI counterpart of GINDI Eq. (61): compute commanded angular
+    % acceleration, then invert Eq. (53)'s rigid-body angular dynamics
+    % directly instead of using the incremental Eq. (60).
     rErr = LogSO3(Rbd);
     omegaDInBody = Rbd * cmd.OmegaD;
     omegaErr = omegaDInBody - x.Omega;
     alphaDInBody = Rbd * cmd.alphaD - hat(x.Omega)*omegaDInBody;
+    omegaDotCmd = par.geometric.KR*rErr ...
+                + par.geometric.KOmega*omegaErr ...
+                + alphaDInBody;
     tau = cross(x.Omega, par.J*x.Omega) ...
-        + par.geometric.KR*rErr + par.geometric.KOmega*omegaErr;
+        + par.J*omegaDotCmd;
 
     u = controlAllocation([cmd.T; tau], Rd, par);
     u.OmegaD = omegaDInBody;
@@ -1427,9 +1411,11 @@ function cmd = geometricCommand(x, ref, par)
 
     ep = ref.p - x.p;
     ev = ref.v - x.v;
+    % GINDI Eq. (56), used here as the non-INDI outer-loop command.
     aFb = par.geometric.Kp*ep + par.geometric.Kv*ev;
     aCmd = ref.a + aFb;
 
+    % Direct non-INDI inversion of Eq. (53): T*b_z = m*(g*i_z - a_c).
     thrustAxisForce = par.m*(par.g*par.e3 - aCmd);
     T = norm(thrustAxisForce);
 
@@ -1439,7 +1425,7 @@ function cmd = geometricCommand(x, ref, par)
     % Lee's paper controller uses the current-attitude projection.
     [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
         x, ref, x.v - ref.v, thrustAxisForce, T, ...
-        par.geometric.Kp, par.geometric.Kv, par, "norm");
+        par.geometric.Kp, par.geometric.Kv, par.m, par, "norm");
     [xC, xCDot, xCDDot] = yawHeadingAxis(ref);
     [Rd, RdDot, RdDDot] = attitudeFromBodyZAndHeading( ...
         thrustAxisForce, forceDot, forceDDot, ...
@@ -1490,8 +1476,8 @@ function cmd = leePositionCommand(x, ref, par)
     ex = x.p - ref.p;
     ev = x.v - ref.v;
 
-    thrustAxisForce = par.m*(par.lee.Kp*ex + par.lee.Kv*ev ...
-        + par.g*par.e3 - ref.a);
+    thrustAxisForce = par.lee.Kp*ex + par.lee.Kv*ev ...
+        + par.m*(par.g*par.e3 - ref.a);
     T = dot(thrustAxisForce, x.R*par.e3);
 
     [forceDot, forceDDot] = leeThrustAxisForceDerivatives( ...
@@ -1517,20 +1503,21 @@ function [forceDot, forceDDot] = leeThrustAxisForceDerivatives( ...
 
     [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
         x, ref, ev, thrustAxisForce, T, ...
-        par.lee.Kp, par.lee.Kv, par, "projection");
+        par.lee.Kp, par.lee.Kv, 1, par, "projection");
 end
 
 function [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
-        x, ref, ev, thrustAxisForce, T, Kp, Kv, par, thrustDerivativeMode)
+        x, ref, ev, thrustAxisForce, T, Kp, Kv, gainScale, ...
+        par, thrustDerivativeMode)
 
     % Analytic derivative of Lee's A, implemented through F=-A:
-    % Fdot=m*(Kp*ev+Kv*(a-ref.a)-ref.j),
-    % Fddot=m*(Kp*(a-ref.a)+Kv*(adot-ref.j)-ref.s).
+    % Fdot=gainScale*(Kp*ev+Kv*(a-ref.a))-m*ref.j,
+    % Fddot=gainScale*(Kp*(a-ref.a)+Kv*(adot-ref.j))-m*ref.s.
     b3 = x.R*par.e3;
     b3Dot = x.R*hat(x.Omega)*par.e3;
 
     accel = par.g*par.e3 - T/par.m*b3;
-    forceDot = par.m*(Kp*ev + Kv*(accel - ref.a) - ref.j);
+    forceDot = gainScale*(Kp*ev + Kv*(accel - ref.a)) - par.m*ref.j;
 
     switch string(thrustDerivativeMode)
         case "projection"
@@ -1542,8 +1529,8 @@ function [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
     end
     accelDot = -TDot/par.m*b3 - T/par.m*b3Dot;
 
-    forceDDot = par.m*(Kp*(accel - ref.a) ...
-        + Kv*(accelDot - ref.j) - ref.s);
+    forceDDot = gainScale*(Kp*(accel - ref.a) ...
+        + Kv*(accelDot - ref.j)) - par.m*ref.s;
 end
 
 function [xC, xCDot, xCDDot] = yawHeadingAxis(ref)
@@ -1850,7 +1837,7 @@ function K = johnsonPositionGain(par)
             Kp = getStructField(par.johnson, 'Kp', par.lee.Kp);
             Kv = getStructField(par.johnson, 'Kv', par.lee.Kv);
             Ki = getStructField(par.johnson, 'Ki', zeros(3));
-            K = par.m*[Kp, Kv, Ki];
+            K = [Kp, Kv, Ki];
         otherwise
             error('Unknown par.johnson.positionGainMode "%s".', mode);
     end
@@ -2057,7 +2044,7 @@ function [Rd, xiE, T] = talIncrementalAttitudeCommand(R, thrustAccelCmd, psiRef,
         qYaw = [1; 0; 0; 0];
     else
         k = -nBody(1)/nBody(2);
-        qYaw = [1; 0; 0; k/(1 + sqrt(1 + k^2))]; % Correct the original text of tal
+        qYaw = [1; 0; 0; k]; % Correct the original text of tal
         qYaw = normalizeQuatWXYZ(qYaw);
     end
 
@@ -2316,7 +2303,12 @@ function sunConfigureAcadosSolver(pyModule, par)
 
     G1 = sunAllocationMatrix(par);
 
-    codegenDir = fullfile(tempdir, "uav_sun_acados_codegen");
+    if isfield(par.sun, 'acadosCodegenDir')
+        codegenDir = par.sun.acadosCodegenDir;
+    else
+        codegenDir = fullfile(tempdir, "uav_sun_acados_codegen");
+    end
+
     pyModule.configure(pyargs( ...
         'n_horizon', int32(par.sun.N), ...
         'dt', double(par.sun.dt), ...
@@ -2827,7 +2819,7 @@ function tau = luMpcRateLoop(x, OmegaCmd, t, par)
         rateError = OmegaCmd - x.Omega;
 
         rateP = matrix3(getStructField(par.lu, ...
-            'rateP', par.KOmega), 'par.lu.rateP');
+            'rateP', par.J*par.KOmega), 'par.lu.rateP');
         rateI = matrix3(getStructField(par.lu, ...
             'rateI', zeros(3)), 'par.lu.rateI');
         rateD = matrix3(getStructField(par.lu, ...
@@ -2863,19 +2855,24 @@ function u = controllerGeometricINDI(x, ref, t, par)
     ref = completeReferenceDerivatives(ref);
     ep = ref.p - x.p;
     ev = ref.v - x.v;
+    % GINDI Eq. (56).
     aCmd = par.geometric_indi.Kp*ep + par.geometric_indi.Kv*ev + ref.a;
 
     if isempty(st) || t <= par.dt/2
         thrustAxisForce = par.m*(par.g*par.e3 - aCmd);
         T = norm(thrustAxisForce);
-        cmd = geometricINDIReferenceFromForce(x, ref, thrustAxisForce, T, par);
+        cmd = geometricINDIReferenceCommand( ...
+            x, ref, thrustAxisForce, T, par);
         Rd = cmd.Rd;
-        [omegaRefBody, alphaRefBody] = referenceRatesInCurrentBody( ...
-            x, Rd, cmd.OmegaD, cmd.alphaD);
+        omegaRefBody = cmd.omegaRefBody;
+        alphaRefBody = cmd.alphaRefBody;
 
         rErr = LogSO3(x.R' * Rd);
         omegaErr = omegaRefBody - x.Omega;
-        tau = par.geometric_indi.KR*rErr + par.geometric_indi.KOmega*omegaErr;
+        OmegaDotCmd = par.geometric_indi.Ktheta*rErr ...
+                    + par.geometric_indi.Komega*omegaErr ...
+                    + alphaRefBody;
+        tau = cross(x.Omega, par.J*x.Omega) + par.J*OmegaDotCmd;
         u = controlAllocation([T; tau], Rd, par);
         u.OmegaD = omegaRefBody;
         u.alphaD = alphaRefBody;
@@ -2888,13 +2885,15 @@ function u = controllerGeometricINDI(x, ref, t, par)
     vDot0 = (x.v - st.v)/h;
     OmegaDot0 = (x.Omega - st.Omega)/h;
 
+    % GINDI Eq. (55): incremental virtual thrust-vector command.
     T_b_z0 = st.T * st.R*par.e3;
     T_b_z = T_b_z0 - par.m*(aCmd - vDot0);
     T = norm(T_b_z);
-    cmd = geometricINDIReferenceFromForce(x, ref, T_b_z, T, par);
+    cmd = geometricINDIReferenceCommand( ...
+        x, ref, T_b_z, st.T, par);
     Rd = cmd.Rd;
-    [omegaRefBody, alphaRefBody] = referenceRatesInCurrentBody( ...
-        x, Rd, cmd.OmegaD, cmd.alphaD);
+    omegaRefBody = cmd.omegaRefBody;
+    alphaRefBody = cmd.alphaRefBody;
 
     rErr = LogSO3(x.R' * Rd);
     OmegaDotCmd = par.geometric_indi.Ktheta*rErr ...
@@ -2910,34 +2909,20 @@ function u = controllerGeometricINDI(x, ref, t, par)
     st = updateINDIState(x, u, t);
 end
 
-function cmd = geometricINDIReferenceFromForce(x, ref, thrustAxisForce, T, par)
+function cmd = geometricINDIReferenceCommand( ...
+        x, ref, thrustAxisForce, TForRates, par)
 
-    % Match geometric/Lee/Johnson reference generation: differentiate the
-    % commanded thrust-axis vector analytically, then recover Rd, OmegaD, and
-    % alphaD from Rd_dot/Rd_ddot instead of finite-differencing SO(3).
-    [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
-        x, ref, x.v - ref.v, thrustAxisForce, T, ...
-        par.geometric_indi.Kp, par.geometric_indi.Kv, par, "norm");
-    [xC, xCDot, xCDDot] = yawHeadingAxis(ref);
-    [Rd, RdDot, RdDDot] = attitudeFromBodyZAndHeading( ...
-        thrustAxisForce, forceDot, forceDDot, ...
-        xC, xCDot, xCDDot);
-
-    OmegaD = vee(Rd' * RdDot);
-    alphaD = vee(Rd' * RdDDot - hat(OmegaD)*hat(OmegaD));
+    % Sun Eq. (14)-(17) gives the same thrust-axis/yaw attitude construction
+    % used by this GINDI path. For reference angular velocity and angular
+    % acceleration, Sun Eq. (18)-(24) is better than the Tal route here.
+    [Rd, T] = sunDesiredAttitudeFromThrustVector(thrustAxisForce, ref.psi);
+    [omegaRefBody, alphaRefBody] = sunFlatnessReferenceRates( ...
+        x, ref, TForRates, par);
 
     cmd.Rd = Rd;
     cmd.T = T;
-    cmd.OmegaD = OmegaD;
-    cmd.alphaD = alphaD;
-end
-
-function [omegaDInBody, alphaDInBody] = referenceRatesInCurrentBody( ...
-        x, Rd, OmegaD, alphaD)
-
-    Rbd = x.R' * Rd;
-    omegaDInBody = Rbd * OmegaD;
-    alphaDInBody = Rbd * alphaD - hat(x.Omega)*omegaDInBody;
+    cmd.omegaRefBody = omegaRefBody;
+    cmd.alphaRefBody = alphaRefBody;
 end
 
 function st = updateINDIState(x, u, t)

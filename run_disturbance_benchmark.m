@@ -3,7 +3,7 @@ function results = run_disturbance_benchmark(cfg)
 %
 % Default comparison:
 %   trajectories : fast_circle, figure8_horizontal, helix_flip
-%   controllers  : geometric, lu_on_manifold_lqr, geometric_indi
+%   controllers  : geometric, lee, johnson, lu, tal, geometric_indi
 %   disturbance  : low/medium/high additive force and moment amplitudes
 %
 % The script calls main.m in batch mode with parameter overrides, so main.m
@@ -61,6 +61,7 @@ function results = run_disturbance_benchmark(cfg)
     IsFinite = false(nTotal,1);
     ErrorMessage = strings(nTotal,1);
 
+    overrides = cell(nTotal,1);
     row = 0;
 
     for iTraj = 1:numel(cfg.trajNames)
@@ -92,35 +93,60 @@ function results = run_disturbance_benchmark(cfg)
 
                 override = makeDisturbanceOverride( ...
                     trajName, controllerName, level, cfg);
-
-                [err, simOk, simMessage, evalInfo] = runBenchmarkSimulation( ...
-                    repoDir, override, cfg);
-
-                if simOk
-                    RMSE(row) = sqrt(mean(err.^2, 'omitnan'));
-                    MeanError(row) = mean(err, 'omitnan');
-                    P95Error(row) = prctile(err, 95);
-                    MaxError(row) = max(err);
-                    FinalError(row) = err(end);
-                    EvalStartS(row) = evalInfo.startTime;
-                    EvalEndS(row) = evalInfo.endTime;
-                    FullEndS(row) = evalInfo.fullEndTime;
-                    NumErrorSamples(row) = numel(err);
-                    ErrorTrace{row} = err(1:cfg.errorSampleStride:end).';
-                    IsFinite(row) = all(isfinite(err));
-
-                    fprintf('[%3d/%3d] %-18s %-16s %-6s rmse=%.4g p95=%.4g max=%.4g\n', ...
-                        row, nTotal, trajName, controllerName, ...
-                        string(level.name), RMSE(row), P95Error(row), ...
-                        MaxError(row));
-
-                else
-                    ErrorMessage(row) = simMessage;
-                    fprintf('[%3d/%3d] FAILED %s %s %s: %s\n', ...
-                        row, nTotal, trajName, controllerName, ...
-                        string(level.name), simMessage);
-                end
+                overrides{row} = override;
             end
+        end
+    end
+
+    errCell = cell(nTotal,1);
+    simOk = false(nTotal,1);
+    simMessage = strings(nTotal,1);
+    evalInfoCell = cell(nTotal,1);
+
+    if cfg.useParallel
+        pool = startBenchmarkPool(cfg);
+        fprintf('Running %d benchmark simulations in parallel with %d workers.\n', ...
+            nTotal, pool.NumWorkers);
+        parfor iRun = 1:nTotal
+            [errCell{iRun}, simOk(iRun), simMessage(iRun), ...
+                evalInfoCell{iRun}] = runBenchmarkSimulation( ...
+                repoDir, overrides{iRun}, cfg);
+        end
+    else
+        fprintf('Running %d benchmark simulations serially.\n', nTotal);
+        for iRun = 1:nTotal
+            [errCell{iRun}, simOk(iRun), simMessage(iRun), ...
+                evalInfoCell{iRun}] = runBenchmarkSimulation( ...
+                repoDir, overrides{iRun}, cfg);
+        end
+    end
+
+    for iRun = 1:nTotal
+        err = errCell{iRun};
+        evalInfo = evalInfoCell{iRun};
+
+        if simOk(iRun)
+            RMSE(iRun) = sqrt(mean(err.^2, 'omitnan'));
+            MeanError(iRun) = mean(err, 'omitnan');
+            P95Error(iRun) = prctile(err, 95);
+            MaxError(iRun) = max(err);
+            FinalError(iRun) = err(end);
+            EvalStartS(iRun) = evalInfo.startTime;
+            EvalEndS(iRun) = evalInfo.endTime;
+            FullEndS(iRun) = evalInfo.fullEndTime;
+            NumErrorSamples(iRun) = numel(err);
+            ErrorTrace{iRun} = err(1:cfg.errorSampleStride:end).';
+            IsFinite(iRun) = all(isfinite(err));
+
+            fprintf('[%3d/%3d] %-18s %-16s %-6s rmse=%.4g p95=%.4g max=%.4g\n', ...
+                iRun, nTotal, Trajectory(iRun), Controller(iRun), ...
+                DisturbanceLevel(iRun), RMSE(iRun), P95Error(iRun), ...
+                MaxError(iRun));
+        else
+            ErrorMessage(iRun) = simMessage(iRun);
+            fprintf('[%3d/%3d] FAILED %s %s %s: %s\n', ...
+                iRun, nTotal, Trajectory(iRun), Controller(iRun), ...
+                DisturbanceLevel(iRun), simMessage(iRun));
         end
     end
 
@@ -135,7 +161,7 @@ function results = run_disturbance_benchmark(cfg)
     figureFiles = strings(0,1);
 
     if cfg.makePlots
-        figureFiles = plotDisturbanceBenchmark(results, cfg, figDir);
+        figureFiles = plot_box(results, cfg, 'OutputDir', figDir);
     end
 
     results.Properties.UserData.outputDir = outDir;
@@ -162,7 +188,8 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
         cfg.trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
     end
     if ~isfield(cfg, 'controllerNames')
-        cfg.controllerNames = ["geometric", "lu_on_manifold_lqr", "geometric_indi"];
+        cfg.controllerNames = ["geometric", "lee", "johnson", ...
+            "lu", "tal", "geometric_indi"];
     end
     cfg.trajNames = string(cfg.trajNames);
     cfg.controllerNames = string(cfg.controllerNames);
@@ -170,11 +197,11 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
         cfg.levels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
             'forceAmp', {[0.05; 0.05; 0.03], ...
-                         [0.15; 0.15; 0.08], ...
-                         [0.30; 0.30; 0.12]}, ...
-            'momentAmp',{[0.002; 0.002; 0.0005], ...
-                         [0.006; 0.006; 0.0015], ...
-                         [0.012; 0.012; 0.0030]});
+                         [0.10; 0.10; 0.06], ...
+                         [0.20; 0.20; 0.10]}, ...
+            'momentAmp',{[0.005; 0.005; 0.0005], ...
+                         [0.010; 0.010; 0.0010], ...
+                         [0.020; 0.020; 0.0020]});
     end
     if ~isfield(cfg, 'disturbanceType')
         cfg.disturbanceType = "sin";
@@ -199,6 +226,12 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     if ~isfield(cfg, 'errorTrimEndTime')
         cfg.errorTrimEndTime = 0;
     end
+    if ~isfield(cfg, 'forceFreq')
+        cfg.forceFreq = [0.17; 0.23; 0.31];
+    end
+    if ~isfield(cfg, 'momentFreq')
+        cfg.momentFreq = [0.19; 0.29; 0.37];
+    end
     if ~isfield(cfg, 'forcePhase')
         cfg.forcePhase = [0; 2*pi/3; 4*pi/3];
     end
@@ -213,6 +246,12 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     end
     if ~isfield(cfg, 'integratorName')
         cfg.integratorName = "lie_rk4"; % Faster for large sweeps; use "ode45" to match main default.
+    end
+    if ~isfield(cfg, 'useParallel')
+        cfg.useParallel = false;
+    end
+    if ~isfield(cfg, 'numWorkers')
+        cfg.numWorkers = [];
     end
     if ~isfield(cfg, 'progress')
         cfg.progress = struct(); % Empty means use main.m defaults.
@@ -235,6 +274,9 @@ function override = makeDisturbanceOverride(trajName, controllerName, level, cfg
     override.integratorName = cfg.integratorName;
     override.enablePlots = false;
     override.enableAnimation = false;
+    override.sun.acadosCodegenDir = fullfile(tempdir, ...
+        "uav_sun_acados_codegen_" + matlab.lang.makeValidName( ...
+        trajName + "_" + controllerName + "_" + string(level.name)));
 
     if ~isempty(fieldnames(cfg.progress))
         override.progress = cfg.progress;
@@ -258,6 +300,20 @@ function v = vector3Local(x)
 
     if numel(v) ~= 3
         error("Disturbance direction must be a 3x1 vector.");
+    end
+end
+
+function pool = startBenchmarkPool(cfg)
+
+    pool = gcp('nocreate');
+    if ~isempty(pool)
+        return;
+    end
+
+    if isempty(cfg.numWorkers)
+        pool = parpool;
+    else
+        pool = parpool(cfg.numWorkers);
     end
 end
 
@@ -326,93 +382,4 @@ function [err, info] = selectTrackingErrorWindow(fullErr, time, par, cfg)
     info.startTime = startTime;
     info.endTime = endTime;
     info.fullEndTime = fullEndTime;
-end
-
-function figureFiles = plotDisturbanceBenchmark(results, cfg, figDir)
-
-    levelNames = string({cfg.levels.name});
-    controllerNames = string(cfg.controllerNames);
-    figureFiles = strings(0,1);
-
-    for iTraj = 1:numel(cfg.trajNames)
-        trajName = string(cfg.trajNames(iTraj));
-        mask = results.Trajectory == trajName & results.IsFinite;
-
-        fig = figure('Color', 'w');
-
-        [xLabel, yData, groupLabel, yLabelText] = boxchartData(results, mask, cfg);
-
-        x = categorical(xLabel, levelNames, levelNames);
-        group = categorical(groupLabel, controllerNames, controllerNames);
-
-        boxchart(x, yData, 'GroupByColor', group);
-        grid on;
-        xlabel('disturbance amplitude');
-        ylabel(yLabelText);
-        title("Trajectory: " + trajName, 'Interpreter', 'none');
-        legend('Location', 'northwest', 'Interpreter', 'none');
-
-        ampText = amplitudeSummaryText(cfg.levels);
-        subtitle(ampText, 'Interpreter', 'none');
-
-        if cfg.savePlots
-            pngPath = fullfile(figDir, char(trajName + "_disturbance_boxplot.png"));
-            exportgraphics(fig, pngPath, 'Resolution', 200);
-            figureFiles(end+1,1) = string(pngPath); %#ok<AGROW>
-        end
-
-    end
-end
-
-function [xLabel, yData, groupLabel, yLabelText] = boxchartData(results, mask, cfg)
-
-    source = string(cfg.boxDataSource);
-
-    switch source
-        case "time_error"
-            rowIdx = find(mask).';
-            xLabel = strings(0,1);
-            groupLabel = strings(0,1);
-            yData = zeros(0,1);
-
-            for r = rowIdx
-                err = results.ErrorTrace{r};
-                err = err(isfinite(err));
-                n = numel(err);
-
-                xLabel = [xLabel; repmat(results.DisturbanceLevel(r), n, 1)]; %#ok<AGROW>
-                groupLabel = [groupLabel; repmat(results.Controller(r), n, 1)]; %#ok<AGROW>
-                yData = [yData; err(:)]; %#ok<AGROW>
-            end
-
-            yLabelText = 'position tracking error samples (m)';
-
-        case "rmse"
-            xLabel = results.DisturbanceLevel(mask);
-            groupLabel = results.Controller(mask);
-            yData = results.RMSE(mask);
-            yLabelText = 'RMS position tracking error (m)';
-
-        otherwise
-            error("Unknown cfg.boxDataSource. Use 'time_error' or 'rmse'.");
-    end
-end
-
-function txt = amplitudeSummaryText(levels)
-
-    parts = strings(1, numel(levels));
-    for i = 1:numel(levels)
-        forceAmp = vector3Local(levels(i).forceAmp);
-        momentAmp = vector3Local(levels(i).momentAmp);
-        parts(i) = sprintf('%s: F=%s N, M=%s N*m', ...
-            string(levels(i).name), amplitudeVectorText(forceAmp), ...
-            amplitudeVectorText(momentAmp));
-    end
-    txt = strjoin(parts, ', ');
-end
-
-function txt = amplitudeVectorText(amp)
-
-    amp = amp(:);
-    txt = sprintf('[%.3g %.3g %.3g]', amp(1), amp(2), amp(3));
 end
