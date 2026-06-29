@@ -4,10 +4,10 @@ The model follows the MATLAB benchmark convention:
     x = [p(3), q_wxyz(4), v(3), omega(3)]
     u = four rotor thrusts [N]
 
-The OCP follows the Sun/Agilicious formulation: single-rotor thrust inputs,
-full nonlinear rigid-body dynamics, bounded rates/thrusts, and the Agilicious
-tilt/yaw quaternion residual. Sun Eq. (9) is used for aerodynamic force; d_tau
-is not predicted.
+The OCP follows the Sun formulation: single-rotor thrust inputs, full nonlinear
+rigid-body dynamics, bounded rates/thrusts, and the Eq. (12) quaternion-vector
+attitude residual. Sun Eq. (9) is used for aerodynamic force; d_tau is not
+predicted.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def _q_conj(q):
 
 
 def _q_normalize(q):
-    return q / ca.sqrt(ca.dot(q, q) + 1e-12)
+    return q / ca.sqrt(ca.dot(q, q))
 
 
 def _q_rotate(q, axis):
@@ -60,14 +60,9 @@ def _q_rotate(q, axis):
 def _attitude_residual(q, q_ref):
     qn = _q_normalize(q)
     qrn = _q_normalize(q_ref)
-    # Agilicious tilt/yaw residual: q_e = q^{-1} * q_ref.
-    qe = _q_normalize(_q_mul(_q_conj(qn), qrn))
-    den = ca.sqrt(qe[0] * qe[0] + qe[3] * qe[3] + 1e-3)
-    return ca.vertcat(
-        qe[0] * qe[1] - qe[2] * qe[3],
-        qe[0] * qe[2] + qe[1] * qe[3],
-        qe[3],
-    ) / den
+    # Sun Eq. (12), with the benchmark convention q_e = q^{-1} * q_ref.
+    qe = _q_mul(_q_conj(qn), qrn)
+    return qe[1:4]
 
 
 def _default_allocation_matrix():
@@ -285,7 +280,8 @@ def _np_q_conj(q):
 
 
 def _np_q_normalize(q):
-    return np.asarray(q, dtype=float).reshape(4) / max(np.linalg.norm(q), 1e-12)
+    q = np.asarray(q, dtype=float).reshape(4)
+    return q / np.linalg.norm(q)
 
 
 def _np_q_rotate(q, axis):
@@ -341,9 +337,6 @@ def _np_rk4_step(x, u, dt, cfg):
     k4 = _np_dynamics(x + dt * k3, u, cfg)
     x_next = x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
     x_next[3:7] = _np_q_normalize(x_next[3:7])
-    x_next[10:13] = np.clip(
-        x_next[10:13], -cfg["omega_max"], cfg["omega_max"]
-    )
     return x_next
 
 
