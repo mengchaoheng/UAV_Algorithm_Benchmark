@@ -15,22 +15,25 @@ clear; clc; close all;
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-% trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
-trajNames = ["figure8_horizontal", "figure8_vertical", "helix_flip", "flip_loop_sine",  "fast_circle"];
+trajNames = ["figure8_horizontal", "figure8_vertical", ...
+    "helix_flip", "flip_loop_sine", "fast_circle"];
 % trajNames = ["fast_circle"];
 
 % Available controllers for this comparison:
-% "geometric", "lee", "johnson_beard", "px4_iris"
-% "sun_dfbc", "sun_dfbc_indi"
-% "lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi"
-% "geometric_indi", "tal_karaman"
-% controllerNames = ["geometric", "lee", "johnson_beard", "sun_dfbc_indi","geometric_indi", "tal_karaman"];
+% "geometric", "lee", "johnson"
+% "sun_nmpc", "sun_dfbc"
+% "sun_nmpc_indi", "sun_dfbc_indi"
+% "lu", "geometric_indi", "tal"
+controllerNames = ["geometric", "lee", "johnson", ...
+    "sun_nmpc", "sun_dfbc", ...
+    "sun_nmpc_indi", "sun_dfbc_indi", ...
+    "lu", "tal", "geometric_indi"];
 
-% controllerNames = ["lu_on_manifold_mpc", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
-
+% Optional focused subsets:
+% controllerNames = [ "lu"];
 % controllerNames = ["sun_dfbc", "sun_nmpc", "sun_dfbc_indi", "sun_nmpc_indi"];
-
-controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal_karaman"];
+% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal"];
+% controllerNames = ["lu", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
 
 
 
@@ -59,9 +62,9 @@ switch disturbanceCase
         forcePhase = [0; 2*pi/3; 4*pi/3];
         momentPhase = [pi/4; 3*pi/4; 5*pi/4];
         disturbanceLevels = struct( ...
-            'name',     {'low', 'medium', 'hig7h'}, ...
-            'forceAmp', {0.11,   0.32,      0.50}, ...
-            'momentAmp',{0.05,   0.1,      0.2});
+            'name',     {'low', 'medium', 'high'}, ...
+            'forceAmp', {0.2,   0.5,      0.7}, ...
+            'momentAmp',{0.2,   0.5,      0.7});
 
     case "legacy_bias"
         % The older benchmark style: zero frequency and pi/2 phase make the

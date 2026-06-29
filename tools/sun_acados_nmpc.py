@@ -114,7 +114,7 @@ def _as_matrix(value, shape, default):
 def _default_config():
     return {
         "n_horizon": 20,
-        "dt": 0.05,
+        "dt": 0.01,
         "mass": 0.75,
         "gravity": 9.81,
         "inertia_diag": np.array([0.0025, 0.0021, 0.0043], dtype=float),
@@ -474,7 +474,7 @@ class SunAcadosNMPC:
 
 def configure(
     n_horizon=20,
-    dt=0.05,
+    dt=0.01,
     mass=0.75,
     gravity=9.81,
     inertia_diag=None,
