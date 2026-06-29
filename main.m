@@ -164,19 +164,25 @@ par.px4_iris.useAccelerationFeedforward = true;
 par.px4_iris.useYawRateFeedforward = true;
 par.px4_iris.useAttitudeRateFeedforward = false; % Non-PX4 flatness Omega feed-forward; kept disabled.
 
+% Shared MPC comparison parameters from Sun et al. Table I. The OCP grid
+% interval dt=50 ms is distinct from the 100 Hz receding-horizon refresh
+% period used by the benchmark controllers.
+par.mpc.N = 20;
+par.mpc.dt = 0.05;
+par.mpc.horizon = par.mpc.N * par.mpc.dt;
+par.mpc.Qp = diag([200, 200, 500]);
+par.mpc.Qv = eye(3);
+par.mpc.Qq = diag([5, 5, 200]);
+par.mpc.QOmega = eye(3);
+par.mpc.Qu = 6*eye(4);
+
 % [5] G. Lu, W. Xu, and F. Zhang, “On-Manifold Model Predictive Control for Trajectory Tracking on Robotic Systems,” IEEE Transactions on Industrial Electronics, vol. 70, no. 9, pp. 9192–9202, Sep. 2023, doi: 10.1109/TIE.2022.3212397.
 % Lu et al. on-manifold MPC, quadrotor experiment, Eq. (6)-(16).
 % State error: [p-pd; v-vd; Log(Rd'R)], input: [aT-aTd; Omega-OmegaD].
-par.lu.N = 20;
-par.lu.dt = par.control.outerPeriod;  % OCP grid dt_ocp = h/N = Tc = 10 ms.
+par.lu.N = par.mpc.N;
+par.lu.dt = par.mpc.dt;
 par.lu.horizon = par.lu.N * par.lu.dt;
 par.lu.solvePeriod = par.control.outerPeriod;  % MPC refresh period Tc = 100 Hz.
-par.lu.objectiveMode = "lu_grid_tuned";  % "lu_grid_tuned", "lu_paper", or "custom".
-par.lu.Q = diag([15000, 15000, 15000, ...
-                  40, 40, 40, ...
-                  80, 80, 80]);
-par.lu.R = diag([0.5, 0.6, 0.6, 0.6]);
-par.lu.P = par.lu.Q;
 par.lu.maxQPIt = 120;
 par.lu.qpTol = 1e-7;
 par.lu.omegaMax = par.px4_iris.rateLimit;  % Always align Lu u=[aT;Omega] rate bound with PX4.
@@ -191,19 +197,39 @@ par.lu.rateD = zeros(3);
 par.lu.rateFF = zeros(3);
 par.lu.rateIntLimit = inf(3,1);
 
+% Lu MPC objective, mapped from the shared MPC weights above. Lu attitude
+% error is Log(Rd'R), while Sun Eq. (12) uses q_e,v ~= 0.5*Log, so the
+% shared quaternion-vector attitude weight maps to 0.25*Qq in Lu coordinates.
+% The aT input weight is the total-thrust slice of Sun's rotor-thrust
+% input cost, with T=m*aT:
+%   u' * Win * u = (G^{-1}*mu)' * Win * (G^{-1}*mu)
+%                = mu' * Wmu * mu,  Wmu = G^{-T}*Win*G^{-1}.
+% Lu has no Omega state in its MPC, so its Omega input penalty uses the
+% shared body-rate weight.
+[B, ~, ~] = irisAllocationMatrices(par);
+G = [-B(1,:); B(2:4,:)];
+Win = par.mpc.Qu;
+Ginv = G\eye(4);
+Wmu = Ginv' * Win * Ginv;
+par.lu.Q = blkdiag(par.mpc.Qp, par.mpc.Qv, 0.25*par.mpc.Qq);
+par.lu.P = par.lu.Q;
+par.lu.R = blkdiag(par.m^2*Wmu(1,1), par.mpc.QOmega);
+par.lu.R = 0.5*(par.lu.R + par.lu.R');
+
 % [4] S. Sun, A. Romero, P. Foehn, E. Kaufmann, and D. Scaramuzza, “A Comparative Study of Nonlinear MPC and Differential-Flatness-Based Control for Quadrotor Agile Flight,” Feb. 23, 2022, arXiv: arXiv:2109.01365. Accessed: May 27, 2022. [Online]. Available: http://arxiv.org/abs/2109.01365
 % Sun et al. 2022, Table I controller parameters. The plant/allocation layer
 % uses the benchmark geometry; Sun NMPC/DFBC inputs are individual rotor
 % thrusts u = [u1;u2;u3;u4], as in Eq. (4)-(12).
-par.sun.N = 20;
-par.sun.dt = par.control.outerPeriod;  % OCP grid dt_ocp = h/N = Tc = 10 ms.
+par.sun.N = par.mpc.N;
+par.sun.dt = par.mpc.dt;
 par.sun.horizon = par.sun.N * par.sun.dt;
-par.sun.Qxi = diag([200, 200, 500]);
-par.sun.Qv = eye(3);
-par.sun.Qq = diag([5, 5, 200]);
-par.sun.QOmega = eye(3);
-par.sun.Qu = 6*eye(4);
+par.sun.Qxi = par.mpc.Qp;
+par.sun.Qv = par.mpc.Qv;
+par.sun.Qq = par.mpc.Qq;
+par.sun.QOmega = par.mpc.QOmega;
+par.sun.Qu = par.mpc.Qu;
 par.sun.QN = blkdiag(par.sun.Qxi, par.sun.Qv, par.sun.Qq, par.sun.QOmega);
+
 par.sun.Kxi = par.Kp;
 par.sun.Kv = par.Kv;
 % Sun Eq. (28): these gains produce commanded angular acceleration alphaD.
@@ -259,7 +285,7 @@ par.tal.filterCutoffHz = 30;
 % baseline. When enabled, type must be "constant" or "sin".
 % The force disturbance is expressed in inertial NED coordinates [N]; the
 % moment disturbance is expressed in the body frame [N*m].
-par.disturbance.enabled = false;
+par.disturbance.enabled = true;
 par.disturbance.type = "sin";
 % Disturbance amplitudes are explicit per-axis 3x1 vectors. Yaw torque
 % should stay much smaller than roll/pitch.
@@ -852,35 +878,6 @@ function par = finalizeMPCConfig(par)
     end
     par.lu.omegaMax = par.px4_iris.rateLimit(:);
     par.lu.horizon = par.lu.N * par.lu.dt;
-
-    objectiveMode = lower(string(getStructField( ...
-        par.lu, 'objectiveMode', "lu_paper")));
-    luPaperQ = diag([15000, 15000, 15000, ...
-                     40, 40, 40, ...
-                     80, 80, 80]);
-    luPaperR = diag([0.5, 0.6, 0.6, 0.6]);
-    switch objectiveMode
-        case "lu_grid_tuned"
-            % Lu-paper weight structure retuned for the benchmark grid
-            % Tc=dt_ocp=10 ms, N=20. This is not a physical-parameter
-            % scaling of Lu's MPC model: the QP uses acceleration and
-            % body-rate inputs. Physical parameters enter through thrust
-            % acceleration bounds and the post-MPC rate/allocation adapter.
-            par.lu.Q = 2.0*luPaperQ;
-            par.lu.P = par.lu.Q;
-            par.lu.R = luPaperR;
-
-        case "lu_paper"
-            par.lu.Q = luPaperQ;
-            par.lu.P = par.lu.Q;
-            par.lu.R = luPaperR;
-
-        case "custom"
-            % Use par.lu.Q/R/P as specified above or by user override.
-
-        otherwise
-            error('Unknown par.lu.objectiveMode "%s".', objectiveMode);
-    end
 end
 
 function tauMax = allocationMomentLimits(par)
@@ -2764,8 +2761,8 @@ function u = controllerLu(x, ref, traj, t, par)
     %       [aT_cmd; Omega_cmd] = [aT_d; Omega_d] + delta u_0.
     %
     %   par.lu.solvePeriod is the MPC refresh period Tc. par.lu.dt is the
-    %   OCP grid interval dt_ocp = h/N. In this benchmark comparison,
-    %   dt_ocp = Tc = 10 ms and N = 20, so h = 0.20 s.
+    %   OCP grid interval dt_ocp = h/N. The shared MPC setup follows Sun
+    %   Table I: dt_ocp = 50 ms and N = 20, so h = 1.0 s.
     %
     %   Special handling: Lu's experiment sends aT and body-rate omega to a
     %   low-level body-rate controller. This benchmark uses a Lu-local

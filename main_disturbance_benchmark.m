@@ -15,22 +15,22 @@ clear; clc; close all;
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-% trajNames = ["figure8_horizontal", "figure8_vertical", ...
-%     "helix_flip", "flip_loop_sine", "fast_circle"];
-trajNames = ["helix_flip"];
+trajNames = ["figure8_horizontal", "figure8_vertical", ...
+    "helix_flip", "flip_loop_sine", "fast_circle"];
+% trajNames = ["helix_flip"];
 
 % Available controllers for this comparison:
 % "geometric", "lee", "johnson"
 % "sun_nmpc", "sun_dfbc"
 % "sun_nmpc_indi", "sun_dfbc_indi"
 % "lu", "geometric_indi", "tal"
-% controllerNames = ["geometric", "lee", "johnson", ...
-%     "sun_nmpc", "sun_dfbc", ...
-%     "sun_nmpc_indi", "sun_dfbc_indi", ...
-%     "lu", "tal", "geometric_indi"];
+controllerNames = ["geometric", "lee", "johnson", ...
+    "sun_nmpc", "sun_dfbc", ...
+    "sun_nmpc_indi", "sun_dfbc_indi", ...
+    "lu", "tal", "geometric_indi"];
 
 % Optional focused subsets:
-controllerNames = ["lu"];
+% controllerNames = ["lu", "sun_nmpc", "sun_nmpc_indi"];
 % controllerNames = ["sun_dfbc", "sun_nmpc", "sun_dfbc_indi", "sun_nmpc_indi"];
 % controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "geometric_indi", "tal"];
 % controllerNames = ["lu", "sun_nmpc", "sun_nmpc_indi", "geometric_indi"];
