@@ -1,13 +1,17 @@
-function figureFiles = plot_box(resultsInput, cfg, varargin)
-%PLOT_BOX Replot disturbance benchmark boxcharts from saved results.
+function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
+%PLOT_DISTURBANCE_BENCHMARK Plot or replot disturbance benchmark results.
 %
 % Usage:
-%   plot_box(results, cfg)
-%   plot_box("results/.../disturbance_benchmark_results.mat")
-%   plot_box(matFile, 'ControllerOrder', ["lee","johnson","tal"])
+%   plot_disturbance_benchmark
+%   plot_disturbance_benchmark("results/disturbance_benchmark")
+%   plot_disturbance_benchmark(results, cfg)
 
-    if nargin < 1
-        error("plot_box requires a results table or saved MAT file.");
+    if nargin < 1 || isempty(resultsInput)
+        resultsInput = fullfile(pwd, "results", "disturbance_benchmark", ...
+            "disturbance_benchmark_results.mat");
+    end
+    if nargin < 2
+        cfg = struct();
     end
 
     matPath = "";
@@ -43,9 +47,9 @@ function figureFiles = plot_box(resultsInput, cfg, varargin)
         end
     end
 
-    opts = plotBoxOptions(results, cfg, matPath, args);
-    if opts.savePlots && ~exist(opts.outputDir, 'dir')
-        mkdir(opts.outputDir);
+    opts = plotDisturbanceOptions(results, cfg, matPath, args);
+    if opts.savePlots
+        prepareFigureDir(opts.outputDir);
     end
 
     figureFiles = strings(0,1);
@@ -56,7 +60,7 @@ function figureFiles = plot_box(resultsInput, cfg, varargin)
             continue;
         end
 
-        fig = figure('Color', 'w');
+        fig = figure('Color', 'w', 'Name', char(trajName + "_disturbance_boxplot"));
         [xLabel, yData, groupLabel, yLabelText] = boxchartData( ...
             results, mask, opts.boxDataSource);
 
@@ -75,13 +79,16 @@ function figureFiles = plot_box(resultsInput, cfg, varargin)
         if opts.savePlots
             pngPath = fullfile(opts.outputDir, ...
                 char(trajName + "_disturbance_boxplot.png"));
+            figPath = fullfile(opts.outputDir, ...
+                char(trajName + "_disturbance_boxplot.fig"));
             exportgraphics(fig, pngPath, 'Resolution', opts.resolution);
+            savefig(fig, figPath);
             figureFiles(end+1,1) = string(pngPath); %#ok<AGROW>
         end
     end
 end
 
-function opts = plotBoxOptions(results, cfg, matPath, args)
+function opts = plotDisturbanceOptions(results, cfg, matPath, args)
 
     opts.savePlots = logical(getCfgField(cfg, 'savePlots', false));
     opts.outputDir = defaultOutputDir(results, matPath);
@@ -114,7 +121,7 @@ function opts = plotBoxOptions(results, cfg, matPath, args)
             case "levelorder"
                 opts.levelOrder = string(value);
             otherwise
-                error("Unknown plot_box option: %s.", name);
+                error("Unknown plot_disturbance_benchmark option: %s.", name);
         end
 
         i = i + 2;
@@ -145,10 +152,28 @@ function outputDir = defaultOutputDir(results, matPath)
     end
 
     if strlength(outputDir) == 0
-        outputDir = fullfile(pwd, "figures");
+        outputDir = fullfile(pwd, "results", "disturbance_benchmark", "figures");
     end
 
     outputDir = char(outputDir);
+end
+
+function prepareFigureDir(outputDir)
+
+    if ~exist(outputDir, 'dir')
+        mkdir(outputDir);
+    end
+
+    deleteMatching(outputDir, '*.png');
+    deleteMatching(outputDir, '*.fig');
+end
+
+function deleteMatching(folder, pattern)
+
+    files = dir(fullfile(folder, pattern));
+    for i = 1:numel(files)
+        delete(fullfile(files(i).folder, files(i).name));
+    end
 end
 
 function values = appendMissing(values, observed)

@@ -11,8 +11,7 @@ function results = run_disturbance_benchmark(cfg)
 % controllers. Results are stored as MAT/CSV files. By default the boxcharts
 % use all selected tracking-error samples from each run. cfg.errorEvalMode can
 % exclude the final prediction horizon so terminal-reference policy does not
-% leak into a continuous-tracking benchmark. Figures are always displayed;
-% cfg.savePlots only controls whether PNG copies are written to disk.
+% leak into a continuous-tracking benchmark.
 
     if nargin < 1
         cfg = struct();
@@ -21,14 +20,13 @@ function results = run_disturbance_benchmark(cfg)
     repoDir = fileparts(mfilename('fullpath'));
     cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir);
 
-    runId = string(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
-    outDir = fullfile(cfg.outputRoot, char(runId));
+    outDir = char(cfg.outputRoot);
     figDir = fullfile(outDir, 'figures');
     if ~exist(outDir, 'dir')
         mkdir(outDir);
     end
 
-    if cfg.savePlots && ~exist(figDir, 'dir')
+    if cfg.makePlots && ~exist(figDir, 'dir')
         mkdir(figDir);
     end
 
@@ -161,7 +159,8 @@ function results = run_disturbance_benchmark(cfg)
     figureFiles = strings(0,1);
 
     if cfg.makePlots
-        figureFiles = plot_box(results, cfg, 'OutputDir', figDir);
+        figureFiles = plot_disturbance_benchmark( ...
+            results, cfg, 'OutputDir', figDir);
     end
 
     results.Properties.UserData.outputDir = outDir;
@@ -274,6 +273,7 @@ function override = makeDisturbanceOverride(trajName, controllerName, level, cfg
     override.integratorName = cfg.integratorName;
     override.enablePlots = false;
     override.enableAnimation = false;
+    override.saveResults = false;
     override.sun.acadosCodegenDir = fullfile(tempdir, ...
         "uav_sun_acados_codegen_" + matlab.lang.makeValidName( ...
         trajName + "_" + controllerName + "_" + string(level.name)));

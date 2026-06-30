@@ -295,16 +295,21 @@ par.disturbance.endTime = inf;
 % Initial condition
 par.startOnReference = true;
 
-% 3D attitude sampling visualization
-par.poseEvery = 0.5;       % seconds
-par.bodyAxisScale = 0.3;   % meters
-par.poseSource = "actual";  % "actual" or "desired"
-
-% Post-simulation 3D animation
+% Post-simulation plotting
 par.enablePlots = true;
-par.enableAnimation = true;
+par.saveResults = true;
+par.saveFigures = true;
+par.saveMat = true;
+par.resultDir = fullfile(pwd, "results", "main");
+par.plotStateDetail = true;        % Optional state/component tracking detail.
+par.plotBodyAxes = false;
+par.plotBodyAxesEvery = 1;          % seconds, only used when plotBodyAxes=true.
+par.plotBodyAxisScale = 0.3;        % meters, only used when plotBodyAxes=true.
+par.plotBodyAxesPoseSource = "actual"; % "actual" or "desired"
 par.animationSpeed = 1;       % 1.0 = real time
 par.animationFrameDt = 0.02;    % seconds
+par.animationPoseSource = "actual";  % "actual" or "desired"
+par.animationBodyAxisScale = 0.3;    % meters
 
 if ~isempty(fieldnames(parOverride__))
     par = mergeStructRecursive(par, parOverride__);
@@ -451,12 +456,15 @@ end
 
 %% ========================================================================
 %% 5. Plot
-if par.enablePlots
-    plotResults(time, log, par, traj);
+if par.saveResults
+    par.resultDir = saveMainRunResults(time, log, par, traj);
 end
 
-if par.enableAnimation
-    animateTrajectory3D(time, log, par, traj);
+if par.enablePlots
+    plot_main(time, log, par, traj, ...
+        'OutputDir', fullfile(par.resultDir, 'figures'), ...
+        'SavePlots', par.saveFigures, ...
+        'PlotStateDetail', par.plotStateDetail);
 end
 
 %% ========================================================================
@@ -3514,264 +3522,26 @@ function R = projectSO3(R)
 end
 
 %% ========================================================================
-%% Plot layer
-function plotResults(time, log, par, traj)
+%% Result layer
+function resultDir = saveMainRunResults(time, log, par, traj)
 
-    % Bounded Euler-angle display.
-    % Each angle is displayed in [-180 deg, 180 deg].
-    eul = wrapToPiLocal(log.euler);
-    eulD = wrapToPiLocal(log.eulerD);
-
-    figure;
-
-    hActual = plot3(log.p(1,:), log.p(2,:), log.p(3,:), ...
-        'LineWidth', 1.6); 
-    hold on;
-
-    hRef = plot3(log.pd(1,:), log.pd(2,:), log.pd(3,:), ...
-        '--', 'LineWidth', 1.6);
-
-    switch par.poseSource
-        case "actual"
-            poseP = log.p;
-            poseR = log.R;
-        case "desired"
-            poseP = log.pd;
-            poseR = log.Rd;
-        otherwise
-            poseP = log.p;
-            poseR = log.R;
-    end
-
-    [hx, hy, hz] = drawSampledBodyAxes(time, poseP, poseR, par);
-
-    grid on; axis equal;
-    view(35, 25);
-    set(gca, 'ZDir', 'reverse');
-    xlabel('x_{NED} north (m)');
-    ylabel('y_{NED} east (m)');
-    zlabel('z_{NED} down (m)');
-    title("3D trajectory with sampled body axes: " + traj.name);
-
-    legend([hActual, hRef, hx, hy, hz], ...
-        {'actual trajectory','reference trajectory','x_B','y_B','z_B'}, ...
-        'Location','best');
-
-    figure;
-
-    labels = {'x (m)', 'y (m)', 'z_{NED} (m)', ...
-              'roll (deg)', 'pitch (deg)', 'yaw (deg)'};
-
-    actual = [log.p; rad2deg(eul)];
-    desired = [log.pd; rad2deg(eulD)];
-
-    for i = 1:6
-        subplot(6,1,i);
-        plot(time, actual(i,:), 'LineWidth', 1.1); hold on;
-        plot(time, desired(i,:), '--', 'LineWidth', 1.1);
-        grid on;
-        ylabel(labels{i});
-
-        if i == 1
-            title("Reference tracking: " + traj.name);
-        end
-
-        if i == 6
-            xlabel('time (s)');
-        end
-    end
-
-    legend('actual','reference/command');
-
-    plotDerivativeTracking(time, log, par, traj);
-end
-
-function plotDerivativeTracking(time, log, par, traj)
-
-    accActual = loggedLinearAcceleration(log, par);
-    [omegaRef, alphaRef] = desiredAngularDerivativesForPlot(log, time);
-    alphaActual = loggedAngularAcceleration(log, par);
-
-    figure;
-
-    labels = {'v_x (m/s)', 'v_y (m/s)', 'v_z (m/s)', ...
-              'a_x (m/s^2)', 'a_y (m/s^2)', 'a_z (m/s^2)'};
-    actual = [log.v; accActual];
-    desired = [log.vPlotD; log.aPlotD];
-
-    for i = 1:6
-        subplot(6,1,i);
-        plot(time, actual(i,:), 'LineWidth', 1.1); hold on;
-        plot(time, desired(i,:), '--', 'LineWidth', 1.1);
-        grid on;
-        ylabel(labels{i});
-
-        if i == 1
-            title("Velocity/acceleration tracking: " + traj.name);
-        end
-
-        if i == 6
-            xlabel('time (s)');
-        end
-    end
-
-    legend('actual','reference/command');
-
-    figure;
-
-    labels = {'Omega x (rad/s)', 'Omega y (rad/s)', 'Omega z (rad/s)', ...
-              'Omega dot x (rad/s^2)', 'Omega dot y (rad/s^2)', ...
-              'Omega dot z (rad/s^2)'};
-    actual = [log.Omega; alphaActual];
-    desired = [omegaRef; alphaRef];
-
-    for i = 1:6
-        subplot(6,1,i);
-        plot(time, actual(i,:), 'LineWidth', 1.1); hold on;
-        plot(time, desired(i,:), '--', 'LineWidth', 1.1);
-        grid on;
-        ylabel(labels{i});
-
-        if i == 1
-            title("Angular-rate/acceleration tracking: " + traj.name);
-        end
-
-        if i == 6
-            xlabel('time (s)');
-        end
-    end
-
-    legend('actual','reference/command');
-end
-
-function [omegaRef, alphaRef] = desiredAngularDerivativesForPlot(log, time)
-
-    N = numel(time);
-    omegaRef = nan(3, N);
-    alphaRef = nan(3, N);
-
-    if isfield(log, 'OmegaDProvided')
-        mask = log.OmegaDProvided;
-        omegaRef(:,mask) = log.OmegaD(:,mask);
+    if strlength(string(par.resultDir)) > 0
+        resultDir = char(par.resultDir);
     else
-        mask = false(1, N);
+        resultDir = fullfile(pwd, 'results', 'main');
     end
 
-    missingOmega = ~mask;
-    if any(missingOmega)
-        % Fallback visualization only. For sampled/held controllers, Rd
-        % finite differences can show artificial spikes, so controller
-        % implementations should provide their actual OmegaD/ratesSp.
-        [omegaFromRd, alphaFromRd] = rotationLogRates(log.Rd, time);
-        omegaRef(:,missingOmega) = omegaFromRd(:,missingOmega);
-        alphaRef(:,missingOmega) = alphaFromRd(:,missingOmega);
+    if ~exist(resultDir, 'dir')
+        mkdir(resultDir);
     end
 
-    if isfield(log, 'alphaDProvided')
-        mask = log.alphaDProvided;
-        alphaRef(:,mask) = log.alphaD(:,mask);
-    end
-end
-
-function acc = loggedLinearAcceleration(log, par)
-
-    N = size(log.v, 2);
-    acc = zeros(3, N);
-
-    for k = 1:N
-        acc(:,k) = par.g*par.e3 ...
-            - log.T(k)/par.m*log.R(:,:,k)*par.e3 ...
-            + (log.aeroForce(:,k) + log.forceDist(:,k))/par.m;
-    end
-end
-
-function alpha = loggedAngularAcceleration(log, par)
-
-    N = size(log.Omega, 2);
-    alpha = zeros(3, N);
-
-    for k = 1:N
-        Omega = log.Omega(:,k);
-        alpha(:,k) = par.J \ (log.tau(:,k) + log.momentDist(:,k) ...
-            - cross(Omega, par.J*Omega));
-    end
-end
-
-function [omega, alpha] = rotationLogRates(RLog, time)
-
-    N = numel(time);
-    omega = zeros(3, N);
-    alpha = zeros(3, N);
-
-    if N < 2
-        return;
+    if par.saveMat
+        par.resultDir = resultDir;
+        save(fullfile(resultDir, 'main_run.mat'), ...
+            'time', 'log', 'par', 'traj', '-v7.3');
     end
 
-    for k = 1:N-1
-        h = time(k+1) - time(k);
-        omega(:,k) = LogSO3(RLog(:,:,k)' * RLog(:,:,k+1))/h;
-    end
-
-    omega(:,N) = omega(:,N-1);
-
-    for k = 1:N-1
-        h = time(k+1) - time(k);
-        omegaNextAtK = RLog(:,:,k)' * RLog(:,:,k+1) * omega(:,k+1);
-        alpha(:,k) = (omegaNextAtK - omega(:,k))/h;
-    end
-
-    alpha(:,N) = alpha(:,N-1);
-end
-
-%% ========================================================================
-%% Draw sampled body-frame axes on 3D trajectory
-function [hx, hy, hz] = drawSampledBodyAxes(time, pLog, RLog, par)
-
-    step = max(1, round(par.poseEvery/par.dt));
-    idxList = unique([1:step:numel(time), numel(time)]);
-
-    L = par.bodyAxisScale;
-
-    hx = gobjects(1);
-    hy = gobjects(1);
-    hz = gobjects(1);
-
-    for s = 1:numel(idxList)
-
-        idx = idxList(s);
-
-        pNED = pLog(:,idx);
-        R = RLog(:,:,idx);
-
-        if s == 1
-            hx = quiver3(pNED(1), pNED(2), pNED(3), ...
-                    L*R(1,1), L*R(2,1), L*R(3,1), ...
-                    0, 'r', 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
-
-            hy = quiver3(pNED(1), pNED(2), pNED(3), ...
-                    L*R(1,2), L*R(2,2), L*R(3,2), ...
-                    0, 'g', 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
-
-            hz = quiver3(pNED(1), pNED(2), pNED(3), ...
-                    L*R(1,3), L*R(2,3), L*R(3,3), ...
-                    0, 'b', 'LineWidth', 1.0, 'MaxHeadSize', 0.8);
-        else
-            quiver3(pNED(1), pNED(2), pNED(3), ...
-                    L*R(1,1), L*R(2,1), L*R(3,1), ...
-                    0, 'r', 'LineWidth', 1.0, 'MaxHeadSize', 0.8, ...
-                    'HandleVisibility','off');
-
-            quiver3(pNED(1), pNED(2), pNED(3), ...
-                    L*R(1,2), L*R(2,2), L*R(3,2), ...
-                    0, 'g', 'LineWidth', 1.0, 'MaxHeadSize', 0.8, ...
-                    'HandleVisibility','off');
-
-            quiver3(pNED(1), pNED(2), pNED(3), ...
-                    L*R(1,3), L*R(2,3), L*R(3,3), ...
-                    0, 'b', 'LineWidth', 1.0, 'MaxHeadSize', 0.8, ...
-                    'HandleVisibility','off');
-        end
-    end
+    fprintf('main results saved to: %s\n', resultDir);
 end
 
 %% SO(3) utility functions
