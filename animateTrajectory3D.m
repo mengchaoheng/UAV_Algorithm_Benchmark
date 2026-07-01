@@ -1,4 +1,4 @@
-function fig = animateTrajectory3D(time, log, par, traj)
+function fig = animateTrajectory3D(time, log, par, ~)
 % Animate actual and reference 3D trajectories after simulation.
 
     p = log.p;
@@ -13,11 +13,13 @@ function fig = animateTrajectory3D(time, log, par, traj)
 
     hPath = plot3(ax, pd(1,:), pd(2,:), pd(3,:), ':', ...
         'Color', [0.45 0.45 0.45], 'LineWidth', 1.0);
-    hP = plot3(ax, nan, nan, nan, 'b', 'LineWidth', 1.8);
-    hPd = plot3(ax, nan, nan, nan, '--', 'Color', [0.85 0.33 0.10], ...
-        'LineWidth', 1.3);
+    hP = animatedline(ax, 'Color', 'b', 'LineWidth', 1.8);
+    hPd = animatedline(ax, 'LineStyle', '--', ...
+        'Color', [0.85 0.33 0.10], 'LineWidth', 1.3);
     hPoint = plot3(ax, p(1,1), p(2,1), p(3,1), 'bo', ...
         'MarkerFaceColor', 'b', 'MarkerSize', 6);
+    addpoints(hP, p(1,1), p(2,1), p(3,1));
+    addpoints(hPd, pd(1,1), pd(2,1), pd(3,1));
 
     [origin, xB, yB, zB] = bodyAxes(poseP, poseR, 1, bodyAxisScale);
     hx = quiver3(ax, origin(1), origin(2), origin(3), xB(1), xB(2), xB(3), 0, 'r');
@@ -39,23 +41,27 @@ function fig = animateTrajectory3D(time, log, par, traj)
 
     speed = max(par.animationSpeed, eps);
     frameDt = max(par.animationFrameDt, eps);
-    drawnow;
+    [frameTimes, idxList] = animationFrameIndices(time, frameDt);
+    lastIdx = 1;
+
+    drawnow nocallbacks;
     t0 = tic;
 
-    while ishandle(fig)
-        frameStart = toc(t0);
-        tNow = min(time(1) + speed*frameStart, time(end));
-        idx = find(time <= tNow, 1, 'last');
-        if isempty(idx)
-            idx = 1;
-        end
+    for iFrame = 1:numel(idxList)
+        pauseUntilFrame(t0, (frameTimes(iFrame) - time(1))/speed);
 
         if ~ishandle(fig)
             break;
         end
 
-        set(hP, 'XData', p(1,1:idx), 'YData', p(2,1:idx), 'ZData', p(3,1:idx));
-        set(hPd, 'XData', pd(1,1:idx), 'YData', pd(2,1:idx), 'ZData', pd(3,1:idx));
+        idx = idxList(iFrame);
+        if idx > lastIdx
+            addpoints(hP, p(1,lastIdx+1:idx), ...
+                p(2,lastIdx+1:idx), p(3,lastIdx+1:idx));
+            addpoints(hPd, pd(1,lastIdx+1:idx), ...
+                pd(2,lastIdx+1:idx), pd(3,lastIdx+1:idx));
+            lastIdx = idx;
+        end
         set(hPoint, 'XData', p(1,idx), 'YData', p(2,idx), 'ZData', p(3,idx));
 
         [origin, xB, yB, zB] = bodyAxes(poseP, poseR, idx, bodyAxisScale);
@@ -63,13 +69,34 @@ function fig = animateTrajectory3D(time, log, par, traj)
         updateQuiver(hy, origin, yB);
         updateQuiver(hz, origin, zB);
 
-        drawnow limitrate nocallbacks;
+        drawnow nocallbacks;
+    end
+end
 
-        if time(idx) >= time(end)
-            break;
+function [frameTimes, idxList] = animationFrameIndices(time, frameDt)
+    time = time(:).';
+    frameTimes = time(1):frameDt:time(end);
+    if isempty(frameTimes) || frameTimes(end) < time(end)
+        frameTimes(end+1) = time(end);
+    end
+
+    idxList = zeros(size(frameTimes));
+    idx = 1;
+    for i = 1:numel(frameTimes)
+        while idx < numel(time) && time(idx+1) <= frameTimes(i)
+            idx = idx + 1;
         end
+        idxList(i) = idx;
+    end
 
-        pause(max(0, frameDt/speed - (toc(t0) - frameStart)));
+    [idxList, uniqueIdx] = unique(idxList, 'stable');
+    frameTimes = frameTimes(uniqueIdx);
+end
+
+function pauseUntilFrame(t0, targetElapsed)
+    remaining = targetElapsed - toc(t0);
+    if remaining > 0
+        pause(remaining);
     end
 end
 

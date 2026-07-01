@@ -3,7 +3,8 @@
 *.asv
 __pycache__/
 *.pyc
-
+.venv/
+.acados/
 
 /results
 agilicious_internal_mine

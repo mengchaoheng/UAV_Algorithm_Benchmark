@@ -19,7 +19,8 @@ from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib")
 ACADOS_SOURCE_DIR = os.environ.get(
-    "ACADOS_SOURCE_DIR", str(Path.home() / ".local" / "src" / "acados")
+    "ACADOS_SOURCE_DIR",
+    str(Path(__file__).resolve().parents[1] / ".acados" / "acados"),
 )
 os.environ.setdefault("ACADOS_SOURCE_DIR", ACADOS_SOURCE_DIR)
 os.environ.setdefault("ACADOS_INSTALL_DIR", ACADOS_SOURCE_DIR)

@@ -73,7 +73,7 @@ par.progress.scaleRange = [1, 0.3];   % scale_range: start/end scale over the si
 %   "helix_flip_y"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "figure8_horizontal";
+par.trajName = "fast_circle";
 
 % One knob for all trajectory shapes. The factory below converts it into
 % periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
@@ -85,7 +85,7 @@ par.helixTurns = 5;     % geometric turns; par.progress controls timing
 % "sun_dfbc", "sun_dfbc_indi"
 % "lu", "sun_nmpc", "sun_nmpc_indi"
 % "tal", "geometric_indi"
-par.controllerName = "geometric_indi";
+par.controllerName = "px4_iris";
 % Shared acceleration-level gains, using Sun et al. Table I DFBC values as
 % the benchmark default. Kp/Kv command linear acceleration; KR/KOmega
 % command angular acceleration. Controllers that output force/moment convert
@@ -142,15 +142,15 @@ par.aero.kh = 0.01;
 % This is a PX4-style implementation, not one of the paper controllers in
 % references [1]-[5].
 par.px4_iris.hoverThrust = 0.216;
-par.px4_iris.posP = [5.0; 5.0; 5.0];
-par.px4_iris.velP = [10.0; 10.0; 10.0];
-par.px4_iris.velI = [1.0; 1.0; 1.0];
+par.px4_iris.posP = [5.0; 5.0; 3.0];
+par.px4_iris.velP = [9.0; 9.0; 6.0];
+par.px4_iris.velI = [0.2; 0.2; 0.2];
 par.px4_iris.velD = [0.0; 0.0; 0.0];
 % PX4 is a unitized cascaded controller. Keep its gains in the PX4 namespace
 % instead of remapping the paper-controller acceleration gains into it.
-par.px4_iris.attP = [12.0; 12.0; 12.0];
-par.px4_iris.rateLimit = [10.0; 10.0; 4.0]; % Align cascaded PX4 rates with MPC body-rate bounds.
-par.px4_iris.rateP = [0.0400; 0.0336; 0.4221];
+par.px4_iris.attP = [12.0; 12.0; 6.0];
+par.px4_iris.rateLimit = [18.0; 18.0; 8.0];
+par.px4_iris.rateP = [0.1200; 0.1200; 0.3400];
 par.px4_iris.rateI = [0.0; 0.0; 0.0];
 par.px4_iris.rateD = [0.0; 0.0; 0.0];
 par.px4_iris.rateFF = [0.0; 0.0; 0.0];
@@ -235,16 +235,26 @@ par.sun.KqRed = diag([par.KR(1,1), par.KR(2,2), 0]);
 par.sun.kqYaw = par.KR(3,3);
 par.sun.KOmega = par.KOmega;
 par.sun.omegaMax = [10; 10; 4];
+sunRepoDir = string(fileparts(mfilename('fullpath')));
+if strlength(sunRepoDir) == 0
+    sunRepoDir = string(pwd);
+end
+
 acadosSourceDir = string(getenv("ACADOS_SOURCE_DIR"));
 if strlength(acadosSourceDir) == 0
-    acadosSourceDir = fullfile(getenv("HOME"), ".local", "src", "acados");
+    acadosSourceDir = fullfile(sunRepoDir, ".acados", "acados");
 end
 par.sun.acadosSourceDir = acadosSourceDir;
-par.sun.acadosToolsPath = fullfile(pwd, "tools");
-sunPython = string(getenv("SUN_NMPC_PYTHON"));
-if strlength(sunPython) == 0 ...
-        && exist("/Users/mchmini/.pyenv/versions/3.12.8/bin/python3", "file") == 2
-    sunPython = "/Users/mchmini/.pyenv/versions/3.12.8/bin/python3";
+par.sun.acadosToolsPath = fullfile(sunRepoDir, "tools");
+sunPython = string(getenv("ACADOS_PYTHON"));
+if strlength(sunPython) == 0
+    sunPython = string(getenv("SUN_NMPC_PYTHON"));
+end
+if strlength(sunPython) == 0
+    projectSunPython = fullfile(sunRepoDir, ".venv", "bin", "python3");
+    if exist(projectSunPython, "file") == 2
+        sunPython = string(projectSunPython);
+    end
 end
 par.sun.pythonExecutable = sunPython;
 par.sun.solvePeriod = par.control.outerPeriod;  % NMPC refresh period Tc = 100 Hz.
@@ -298,7 +308,7 @@ par.startOnReference = true;
 % Post-simulation plotting
 par.enablePlots = true;
 par.saveResults = true;
-par.saveFigures = true;
+par.saveFigures = false;
 par.saveMat = true;
 par.resultDir = fullfile(pwd, "results", "main");
 par.plotStateDetail = true;        % Optional state/component tracking detail.
@@ -339,7 +349,19 @@ par.Tend = traj.Tend;
 %% ========================================================================
 %% 2. Initial state
 ref0 = traj.eval(0);
-[R0, ~] = desiredAttitudeFromAccel(ref0.a, ref0.psi, par);
+% Initial reference attitude:
+%   T0*b3d0 = m*(g*e3-a_d0), b3d0 = T0*b3d0/||T0*b3d0||,
+% then combine that thrust axis with the initial yaw heading.
+thrustAxisForce0 = par.m*(par.g*par.e3 - ref0.a);
+if norm(thrustAxisForce0) < 1e-9 %第一类奇异点
+    thrustAxisForce0 = par.m*par.g*par.e3;
+end
+b3d0 = thrustAxisForce0/norm(thrustAxisForce0);
+xC0 = [cos(ref0.psi); sin(ref0.psi); 0];
+if norm(cross(b3d0, xC0)) < 1e-8 %第二类奇异点
+    xC0 = [0; 1; 0];
+end
+R0 = attitudeFromUnitBodyZAndHeading(b3d0, xC0);
 
 if par.startOnReference
     x.p = ref0.p;
@@ -423,15 +445,15 @@ for k = 1:N
         log.alphaDProvided(k) = true;
     end
 
-    log.euler(:,k) = rotm2eulZYX(x.R);
-    log.eulerD(:,k) = rotm2eulZYX(u.Rd);
+    log.euler(:,k) = flip(rotm2eul(x.R, "ZYX")).';
+    log.eulerD(:,k) = flip(rotm2eul(u.Rd, "ZYX")).';
 
     log.T(k) = u.T;
     log.tau(:,k) = u.tau;
     if isfield(u, 'actuator')
         log.actuator(:,k) = u.actuator(:);
     end
-    log.aeroForce(:,k) = sunAeroForceWorld(x.R, x.v, par);
+    log.aeroForce(:,k) = x.R*sunAeroForceBody(x.R, x.v, par);
     [log.forceDist(:,k), log.momentDist(:,k)] = disturbanceAtTime(t, par);
 
     if isfield(u, 'sunNMPCSolved')
@@ -588,7 +610,7 @@ function ref = evalScaleRangeTrajectory( ...
         tClip = simTend;
         scale = scale1;
     else
-        alpha = clampScalar(t/simTend, 0, 1);
+        alpha = min(max(t/simTend, 0), 1);
         tClip = alpha*simTend;
         scale = scale0 + scaleDot*tClip;
     end
@@ -635,7 +657,7 @@ function ref = evalProgressTrajectory( ...
     if allowPredict
         s = max(sRaw, 0);
     else
-        s = clampScalar(sRaw, 0, baseTend);
+        s = min(max(sRaw, 0), baseTend);
 
         if sRaw < 0 || sRaw > baseTend
             sDot = 0;
@@ -665,22 +687,9 @@ function ref = evalProgressTrajectory( ...
     ref.psiDDot = psiDDotBase*sDot^2 + psiDotBase*sDDot;
 end
 
-function y = clampScalar(x, xmin, xmax)
-    y = min(max(x, xmin), xmax);
-end
-
-function accSp = referenceAcceleration(ref, p)
-
-    if p.useAccelerationFeedforward
-        accSp = ref.a;
-    else
-        accSp = zeros(3,1);
-    end
-end
-
 function scale = trajectoryScaleAtFraction(par, fraction)
 
-    fraction = clampScalar(fraction, 0, 1);
+    fraction = min(max(fraction, 0), 1);
 
     if ~isfield(par, 'progress') || ~isfield(par.progress, 'mode')
         scale = 1;
@@ -700,40 +709,10 @@ function scale = trajectoryScaleAtFraction(par, fraction)
     scale = max(scale, eps);
 end
 
-function s = trajectoryBaseTimeAtFraction(par, fraction)
-
-    fraction = clampScalar(fraction, 0, 1);
-
-    if ~isfield(par, 'progress') || ~isfield(par.progress, 'mode')
-        s = fraction*par.Tend;
-        return;
-    end
-
-    switch string(par.progress.mode)
-        case "scale_range"
-            scale0 = par.progress.scaleRange(1);
-            scale1 = par.progress.scaleRange(2);
-            simTend = scaleRangeDuration(par.Tend, par.progress.scaleRange);
-            scaleDot = (scale1 - scale0)/simTend;
-            scale = scale0 + (scale1 - scale0)*fraction;
-
-            if abs(scaleDot) < 1e-12
-                s = fraction*simTend/scale0;
-            else
-                s = log(scale/scale0)/scaleDot;
-            end
-
-        case "scale_fixed"
-            s = fraction*par.Tend/par.progress.scale;
-
-        otherwise
-            s = fraction*par.Tend;
-    end
-end
 
 function shape = trajectoryShape(par)
 
-    intensity = clampScalar(getStructField(par, 'trajIntensity', 0.75), 0, 1);
+    intensity = min(max(getStructField(par, 'trajIntensity', 0.75), 0), 1);
     scaleHalf = trajectoryScaleAtFraction(par, 0.5);
     scaleEnd = trajectoryScaleAtFraction(par, 1.0);
 
@@ -1284,12 +1263,7 @@ end
 function T = periodForAccel(lengthCoeff, accelLimit, Tmin, Tmax)
 
     T = 2*pi*sqrt(max(lengthCoeff, eps)/max(accelLimit, eps));
-    T = clampScalar(T, Tmin, Tmax);
-end
-
-function fWorld = sunAeroForceWorld(R, v, par)
-
-    fWorld = R*sunAeroForceBody(R, v, par);
+    T = min(max(T, Tmin), Tmax);
 end
 
 function fBody = sunAeroForceBody(R, v, par)
@@ -1391,69 +1365,149 @@ end
 
 function u = controllerPDGeometric(x, ref, par)
 
-    cmd = geometricCommand(x, ref, par);
-    Rd = cmd.Rd;
+    % Algorithm model/control law:
+    %   p_dot = v
+    %   v_dot = g*e3 - c*b3, where b3 = R*e3 and c = T/m
+    %   R_dot = R*hat(Omega)
+    %   J*Omega_dot = tau - Omega x J*Omega
+    %   aCmd = a_d + Kp*(p_d-p) + Kv*(v_d-v)
+    %   c = ||g*e3-aCmd||, b3d = (g*e3-aCmd)/c
+    %   OmegaDotCmd = KR*Log(R'*Rd) + KOmega*(R'*Rd*OmegaD-Omega)
+    %                 + alphaD expressed in the body frame
+    %   tau = Omega x J*Omega + J*OmegaDotCmd.
+    ref = completeReferenceDerivatives(ref);
+
+    % Position errors: ep = p_d-p, ev = v_d-v.
+    ep = ref.p - x.p;
+    ev = ref.v - x.v;
+    % GINDI Eq. (56), non-INDI form: aFb = Kp*ep + Kv*ev.
+    aFb = par.geometric.Kp*ep + par.geometric.Kv*ev;
+    % Translational command: a_c = a_d + a_fb.
+    aCmd = ref.a + aFb;
+
+    % Direct non-INDI inversion of Eq. (53):
+    %   c*b3d = g*e3 - a_c,  T = m*c.
+    bodyZAccel = par.g*par.e3 - aCmd;
+    c = norm(bodyZAccel);
+    T = par.m*c;
+
+    % Desired attitude: b3d = bodyZAccel/||bodyZAccel||, then impose yaw.
+    b3d = bodyZAccel/c;
+    [xC, xCDot, xCDDot] = headingAxisFromYaw(ref);
+    Rd = attitudeFromUnitBodyZAndHeading(b3d, xC);
+
+    % Desired attitude derivatives: differentiate the same body +z_B
+    % vector and yaw-heading chain, then map Rd_dot/Rd_ddot to OmegaD.
+    b3 = x.R*par.e3;
+    b3Dot = x.R*hat(x.Omega)*par.e3;
+    % Closed-loop acceleration used for analytic derivatives:
+    %   a = g*e3 - c*b3.
+    aActual = par.g*par.e3 - c*b3;
+    % d(g*e3-a_c)/dt = Kp*(v-v_d) + Kv*(a-a_d) - j_d.
+    bodyZAccelDot = par.geometric.Kp*(x.v - ref.v) ...
+        + par.geometric.Kv*(aActual - ref.a) - ref.j;
+    % cDot = b3d' * bodyZAccelDot for c = ||bodyZAccel||.
+    cDot = dot(b3d, bodyZAccelDot);
+    % aDot = d(g*e3-c*b3)/dt = -(cDot*b3 + c*b3Dot).
+    aActualDot = -cDot*b3 - c*b3Dot;
+    % d2(g*e3-a_c)/dt2 = Kp*(a-a_d) + Kv*(aDot-j_d) - s_d.
+    bodyZAccelDDot = par.geometric.Kp*(aActual - ref.a) ...
+        + par.geometric.Kv*(aActualDot - ref.j) - ref.s;
+
+    [b3d, b3dDot, b3dDDot] = unitVectorDerivativesFromVector( ...
+        bodyZAccel, bodyZAccelDot, bodyZAccelDDot);
+    [RdDot, RdDDot] = attitudeDerivativesFromUnitBodyZAndHeading( ...
+        b3d, b3dDot, b3dDDot, xC, xCDot, xCDDot);
+    OmegaD = vee(Rd' * RdDot);
+    alphaD = vee(Rd' * RdDDot - hat(OmegaD)*hat(OmegaD));
+
     Rbd = x.R' * Rd;
 
-    % Non-INDI counterpart of GINDI Eq. (61): compute commanded angular
-    % acceleration, then invert Eq. (53)'s rigid-body angular dynamics
-    % directly instead of using the incremental Eq. (60).
+    % SO(3) attitude errors:
+    %   rErr = Log(R'*Rd),
+    %   omegaErr = R'*Rd*OmegaD - Omega.
     rErr = LogSO3(Rbd);
-    omegaDInBody = Rbd * cmd.OmegaD;
+    omegaDInBody = Rbd * OmegaD;
     omegaErr = omegaDInBody - x.Omega;
-    alphaDInBody = Rbd * cmd.alphaD - hat(x.Omega)*omegaDInBody;
+    % alphaDInBody = R'*Rd*alphaD - Omega x (R'*Rd*OmegaD).
+    alphaDInBody = Rbd * alphaD - hat(x.Omega)*omegaDInBody;
+    % Non-INDI counterpart of GINDI Eq. (61):
+    %   OmegaDotCmd = KR*rErr + KOmega*omegaErr + alphaDInBody.
     omegaDotCmd = par.geometric.KR*rErr ...
                 + par.geometric.KOmega*omegaErr ...
                 + alphaDInBody;
+    % Rigid-body inversion:
+    %   tau = Omega x J*Omega + J*OmegaDotCmd.
     tau = cross(x.Omega, par.J*x.Omega) ...
         + par.J*omegaDotCmd;
 
-    u = controlAllocation([cmd.T; tau], Rd, par);
+    u = controlAllocation([T; tau], Rd, par);
     u.OmegaD = omegaDInBody;
     u.alphaD = alphaDInBody;
 end
 
-function cmd = geometricCommand(x, ref, par)
-
-    ref = completeReferenceDerivatives(ref);
-
-    ep = ref.p - x.p;
-    ev = ref.v - x.v;
-    % GINDI Eq. (56), used here as the non-INDI outer-loop command.
-    aFb = par.geometric.Kp*ep + par.geometric.Kv*ev;
-    aCmd = ref.a + aFb;
-
-    % Direct non-INDI inversion of Eq. (53): T*b_z = m*(g*i_z - a_c).
-    thrustAxisForce = par.m*(par.g*par.e3 - aCmd);
-    T = norm(thrustAxisForce);
-
-    % Use the same chain-rule path as Lee for the computed attitude rates:
-    % F_cmd -> F_cmd_dot/F_cmd_ddot -> Rd_dot/Rd_ddot -> OmegaD/alphaD.
-    % Geometric keeps its original thrust magnitude T=||F_cmd||, whereas
-    % Lee's paper controller uses the current-attitude projection.
-    [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
-        x, ref, x.v - ref.v, thrustAxisForce, T, ...
-        par.geometric.Kp, par.geometric.Kv, par.m, par, "norm");
-    [xC, xCDot, xCDDot] = yawHeadingAxis(ref);
-    [Rd, RdDot, RdDDot] = attitudeFromBodyZAndHeading( ...
-        thrustAxisForce, forceDot, forceDDot, ...
-        xC, xCDot, xCDDot);
-    OmegaD = vee(Rd' * RdDot);
-    alphaD = vee(Rd' * RdDDot - hat(OmegaD)*hat(OmegaD));
-
-    cmd.Rd = Rd;
-    cmd.T = T;
-    cmd.OmegaD = OmegaD;
-    cmd.alphaD = alphaD;
-end
-
 function u = controllerLee(x, ref, par)
 
-    cmd = leePositionCommand(x, ref, par);
-    Rc = cmd.Rc;
-    OmegaC = cmd.OmegaC;
-    OmegaCDot = cmd.OmegaCDot;
+    % Algorithm model/control law:
+    %   p_dot = v
+    %   v_dot = g*e3 - T/m*R*e3
+    %   R_dot = R*hat(Omega)
+    %   J*Omega_dot = tau - Omega x J*Omega
+    % Lee Eq. (19)-(23), rewritten for this NED/FRD plant:
+    %   F = Kx*(p-p_d) + Kv*(v-v_d) + m*(g*e3-a_d)
+    %   b3c = F/||F||, T = F'*(R*e3)
+    %   eR = 0.5*vee(Rc'*R - R'*Rc)
+    %   eOmega = Omega - R'*Rc*OmegaC
+    %   tau = -KR*eR - KOmega*eOmega + Omega x J*Omega
+    %         - J*(hat(Omega)*R'*Rc*OmegaC - R'*Rc*OmegaCDot).
+    ref = completeReferenceDerivatives(ref);
 
+    % Lee position errors: ex = p-p_d, ev = v-v_d.
+    ex = x.p - ref.p;
+    ev = x.v - ref.v;
+
+    % Position controller output:
+    %   F = Kp*ex + Kv*ev + m*(g*e3-a_d).
+    bodyZVector = par.lee.Kp*ex + par.lee.Kv*ev ...
+        + par.m*(par.g*par.e3 - ref.a);
+    % Lee thrust projection: T = F' * b3.
+    T = dot(bodyZVector, x.R*par.e3);
+
+    % Desired attitude: b3c = F/||F||, then impose yaw.
+    b3d = bodyZVector/norm(bodyZVector);
+    [xC, xCDot, xCDDot] = headingAxisFromYaw(ref);
+    Rc = attitudeFromUnitBodyZAndHeading(b3d, xC);
+
+    % 3. Desired attitude derivatives: differentiate the same body +z_B
+    % vector and yaw-heading chain, then map Rc_dot/Rc_ddot to Omega_c.
+    % Lee Appendix F differentiates A with b3c=-A/||A||. In this NED/FRD
+    % implementation the attitude block receives F=-A=T*b3c, not the
+    % physical thrust force -T*b3c.
+    b3 = x.R*par.e3;
+    b3Dot = x.R*hat(x.Omega)*par.e3;
+    % Closed-loop acceleration under Lee's projected thrust:
+    %   a = g*e3 - T/m*b3.
+    aActual = par.g*par.e3 - T/par.m*b3;
+    % FDot = Kp*ev + Kv*(a-a_d) - m*j_d.
+    bodyZVectorDot = par.lee.Kp*ev ...
+        + par.lee.Kv*(aActual - ref.a) - par.m*ref.j;
+    % Since T = F'*b3, TDot = FDot'*b3 + F'*b3Dot.
+    TDot = dot(bodyZVectorDot, b3) + dot(bodyZVector, b3Dot);
+    % aDot = -TDot/m*b3 - T/m*b3Dot.
+    aActualDot = -TDot/par.m*b3 - T/par.m*b3Dot;
+    % FDDot = Kp*(a-a_d) + Kv*(aDot-j_d) - m*s_d.
+    bodyZVectorDDot = par.lee.Kp*(aActual - ref.a) ...
+        + par.lee.Kv*(aActualDot - ref.j) - par.m*ref.s;
+
+    [b3d, b3dDot, b3dDDot] = unitVectorDerivativesFromVector( ...
+        bodyZVector, bodyZVectorDot, bodyZVectorDDot);
+    [RcDot, RcDDot] = attitudeDerivativesFromUnitBodyZAndHeading( ...
+        b3d, b3dDot, b3dDDot, xC, xCDot, xCDDot);
+    OmegaC = vee(Rc' * RcDot);
+    OmegaCDot = vee(Rc' * RcDDot - hat(OmegaC)*hat(OmegaC));
+
+    % Lee 2010 Eq. (97): OmegaC and OmegaCDot come from Appendix F's
+    % analytic Rc_dot/Rc_ddot chain.
     % Lee's attitude error is proportional to sin(theta) for a relative
     % rotation angle theta. Near large attitude errors, especially close to
     % 180 deg, the error signal weakens even though the true SO(3) distance
@@ -1461,6 +1515,8 @@ function u = controllerLee(x, ref, par)
     % of loss of tracking; the thrust projection T = F'*R*e3 then amplifies
     % the attitude lag into translational error. Keep this unchanged for the
     % paper-faithful Lee controller.
+    % Attitude errors: eR = 0.5*vee(Rc'*R - R'*Rc),
+    % eOmega = Omega - R'*Rc*OmegaC.
     eR = 0.5*vee(Rc' * x.R - x.R' * Rc);
     eOmega = x.Omega - x.R' * Rc * OmegaC;
 
@@ -1469,79 +1525,12 @@ function u = controllerLee(x, ref, par)
         + cross(x.Omega, par.J*x.Omega) ...
         - par.J*(hat(x.Omega)*x.R' * Rc * OmegaC - x.R' * Rc * OmegaCDot);
 
-    u = controlAllocation([cmd.T; tau], Rc, par);
+    u = controlAllocation([T; tau], Rc, par);
     u.OmegaD = OmegaC;
     u.alphaD = OmegaCDot;
 end
 
-function cmd = leePositionCommand(x, ref, par)
-
-    % Lee et al. position-controlled flight mode, Eq. (19)-(23) in the
-    % 2011 complex-maneuver paper and Eq. (12)-(14) in the 2010 paper,
-    % rewritten for this NED/FRD plant where a = g*e3 - T/m*R*e3.
-    ref = completeReferenceDerivatives(ref);
-
-    ex = x.p - ref.p;
-    ev = x.v - ref.v;
-
-    thrustAxisForce = par.lee.Kp*ex + par.lee.Kv*ev ...
-        + par.m*(par.g*par.e3 - ref.a);
-    T = dot(thrustAxisForce, x.R*par.e3);
-
-    [forceDot, forceDDot] = leeThrustAxisForceDerivatives( ...
-        x, ref, ev, thrustAxisForce, T, par);
-    [xC, xCDot, xCDDot] = yawHeadingAxis(ref);
-    [Rc, RcDot, RcDDot] = attitudeFromBodyZAndHeading( ...
-        thrustAxisForce, forceDot, forceDDot, ...
-        xC, xCDot, xCDDot);
-
-    % Lee 2010 Eq. (97): Omega_c and Omega_cdot come from Appendix F's
-    % analytic Rc_dot/Rc_ddot chain.
-    OmegaC = vee(Rc' * RcDot);
-    OmegaCDot = vee(Rc' * RcDDot - hat(OmegaC)*hat(OmegaC));
-
-    cmd.Rc = Rc;
-    cmd.T = T;
-    cmd.OmegaC = OmegaC;
-    cmd.OmegaCDot = OmegaCDot;
-end
-
-function [forceDot, forceDDot] = leeThrustAxisForceDerivatives( ...
-        x, ref, ev, thrustAxisForce, T, par)
-
-    [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
-        x, ref, ev, thrustAxisForce, T, ...
-        par.lee.Kp, par.lee.Kv, 1, par, "projection");
-end
-
-function [forceDot, forceDDot] = thrustAxisForceDerivativesFromGains( ...
-        x, ref, ev, thrustAxisForce, T, Kp, Kv, gainScale, ...
-        par, thrustDerivativeMode)
-
-    % Analytic derivative of Lee's A, implemented through F=-A:
-    % Fdot=gainScale*(Kp*ev+Kv*(a-ref.a))-m*ref.j,
-    % Fddot=gainScale*(Kp*(a-ref.a)+Kv*(adot-ref.j))-m*ref.s.
-    b3 = x.R*par.e3;
-    b3Dot = x.R*hat(x.Omega)*par.e3;
-
-    accel = par.g*par.e3 - T/par.m*b3;
-    forceDot = gainScale*(Kp*ev + Kv*(accel - ref.a)) - par.m*ref.j;
-
-    switch string(thrustDerivativeMode)
-        case "projection"
-            TDot = dot(forceDot, b3) + dot(thrustAxisForce, b3Dot);
-        case "norm"
-            TDot = dot(thrustAxisForce, forceDot)/T;
-        otherwise
-            error("Unknown thrust derivative mode.");
-    end
-    accelDot = -TDot/par.m*b3 - T/par.m*b3Dot;
-
-    forceDDot = gainScale*(Kp*(accel - ref.a) ...
-        + Kv*(accelDot - ref.j)) - par.m*ref.s;
-end
-
-function [xC, xCDot, xCDDot] = yawHeadingAxis(ref)
+function [xC, xCDot, xCDDot] = headingAxisFromYaw(ref)
 
     psi = ref.psi;
     psiDot = ref.psiDot;
@@ -1552,55 +1541,67 @@ function [xC, xCDot, xCDDot] = yawHeadingAxis(ref)
     xCDDot = psiDDot*[-sin(psi); cos(psi); 0] - psiDot^2*xC;
 end
 
-function [Rd, RdDot, RdDDot] = attitudeFromBodyZAndHeading( ...
-        bodyZVector, bodyZVectorDot, bodyZVectorDDot, ...
-        xC, xCDot, xCDDot)
+function Rd = attitudeFromUnitBodyZAndHeading(b3d, xC)
 
-    [b3d, b3dDot, b3dDDot] = normalizeWithDerivatives( ...
-        bodyZVector, bodyZVectorDot, bodyZVectorDDot);
-
-    % Common yaw-heading map. Lee calls xC "b1d"; Johnson uses the same
-    % yaw direction as x_C/s_d. Project it onto the plane normal to b3d.
-    % This is equivalent to C=b3d x xC, b2d=C/||C||, b1d=b2d x b3d;
-    % the Appendix F TeX line b2c=-C/||C|| conflicts with Eq. (36).
-    projection = xC - b3d*dot(b3d, xC);
-    projectionDot = xCDot ...
-        - b3dDot*dot(b3d, xC) ...
-        - b3d*(dot(b3dDot, xC) + dot(b3d, xCDot));
-    projectionDDot = xCDDot ...
-        - b3dDDot*dot(b3d, xC) ...
-        - 2*b3dDot*(dot(b3dDot, xC) + dot(b3d, xCDot)) ...
-        - b3d*(dot(b3dDDot, xC) ...
-            + 2*dot(b3dDot, xCDot) + dot(b3d, xCDDot));
-
-    [b1d, b1dDot, b1dDDot] = normalizeWithDerivatives( ...
-        projection, projectionDot, projectionDDot);
-
-    b2d = cross(b3d, b1d);
-    b2dDot = cross(b3dDot, b1d) + cross(b3d, b1dDot);
-    b2dDDot = cross(b3dDDot, b1d) ...
-        + 2*cross(b3dDot, b1dDot) + cross(b3d, b1dDDot);
-
+    C = cross(b3d, xC);
+    b2d = C/norm(C);
+    b1d = cross(b2d, b3d);
     Rd = [b1d, b2d, b3d];
+end
+
+function [RdDot, RdDDot] = attitudeDerivativesFromUnitBodyZAndHeading( ...
+        b3d, b3dDot, b3dDDot, xC, xCDot, xCDDot)
+
+    % Appendix F writes C=b3c x b1d. The printed b2c=-C/||C|| gives the
+    % opposite yaw direction for this code's convention, so use b2=+C/||C||.
+    C = cross(b3d, xC);
+    CDot = cross(b3dDot, xC) + cross(b3d, xCDot);
+    CDDot = cross(b3dDDot, xC) ...
+        + 2*cross(b3dDot, xCDot) + cross(b3d, xCDDot);
+
+    [b2d, b2dDot, b2dDDot] = unitVectorDerivativesFromVector( ...
+        C, CDot, CDDot);
+
+    b1dDot = cross(b2dDot, b3d) + cross(b2d, b3dDot);
+    b1dDDot = cross(b2dDDot, b3d) ...
+        + 2*cross(b2dDot, b3dDot) + cross(b2d, b3dDDot);
+
     RdDot = [b1dDot, b2dDot, b3dDot];
     RdDDot = [b1dDDot, b2dDDot, b3dDDot];
 end
 
-function [u, uDot, uDDot] = normalizeWithDerivatives(x, xDot, xDDot)
+function [b, bDot, bDDot] = unitVectorDerivativesFromVector(v, vDot, vDDot)
 
-    r = norm(x);
+    % Common formula for b=v/||v||. Callers explicitly construct v, vDot,
+    % and vDDot from their own controller equations.
+    %   rho = ||v||, P = I - b*b'
+    %   bDot = P*vDot/rho
+    %   bDDot = P*vDDot/rho
+    %           - 2*(b'*vDot)/rho*bDot - ||bDot||^2*b.
+    rho = norm(v);
+    b = v/rho;
+    P = eye(numel(v)) - b*b';
 
-    u = x/r;
-    rDot = dot(u, xDot);
-    uDot = (xDot - u*rDot)/r;
-    rDDot = dot(uDot, xDot) + dot(u, xDDot);
-    uDDot = (xDDot - u*rDDot - 2*rDot*uDot)/r;
+    bDot = P*vDot/rho;
+    bDDot = P*vDDot/rho ...
+        - 2*dot(b, vDot)/rho*bDot ...
+        - dot(bDot, bDot)*b;
 end
 
 function u = controllerPX4Iris(x, ref, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   This is a PX4-style cascade, expressed in normalized actuator units:
+    %     position P -> velocity PID+D -> thrust vector thrSp,
+    %     thrust vector + yaw -> Rd,
+    %     quaternion attitude P -> body-rate setpoint,
+    %     body-rate PID -> normalized torque.
+    %   The plant still receives the benchmark allocation output, but
+    %   controlAllocationPX4Normalized interprets
+    %     muNormCmd = [-||thrSp||; torqueNorm]
+    %   with PX4 hover-thrust scaling and normalized moment limits.
     p = par.px4_iris;
     if isempty(st) || t <= par.dt/2 || t <= st.t
         st.velInt = zeros(3,1);
@@ -1623,10 +1624,16 @@ function u = controllerPX4Iris(x, ref, t, par)
     outerDue = t + 0.5*par.dt >= st.nextOuterTime;
     if outerDue
         hOuter = max(t - st.outerT, par.control.innerPeriod);
+        % Measured acceleration estimate for the D term:
+        %   velDot = d(v)/dt.
         velDot = (x.v - st.prevVelOuter)/max(hOuter, eps);
 
+        % PX4 position/velocity loop:
+        %   velSp, accSp, thrSp, Rd.
         [thrSp, Rd, st] = px4PositionControl(x, ref, velDot, par, st, hOuter);
 
+        % PX4 attitude P loop:
+        %   ratesSp = 2*sign(qe_w)*qe_xyz .* attP.
         ratesSp = px4AttitudeControl(x.R, Rd, p);
         if getStructField(p, 'useYawRateFeedforward', true)
             % PX4 mc_att_control adds only the input yaw_sp_move_rate
@@ -1647,10 +1654,13 @@ function u = controllerPX4Iris(x, ref, t, par)
     rateDue = t + 0.5*par.dt >= st.nextRateTime;
     if rateDue
         hRate = max(t - st.rateT, par.control.innerPeriod);
+        % Body-rate derivative estimate for the PX4 D term.
         angularAccel = (x.Omega - st.prevOmegaRate)/max(hRate, eps);
 
+        % PX4 body-rate PID:
+        %   torqueNorm = P*(ratesSp-rates) + I - D*OmegaDot + FF*ratesSp.
         [torqueNorm, st] = px4RateControl( ...
-            x.Omega, st.ratesSp, angularAccel, par, p, st, hRate);
+            x.Omega, st.ratesSp, angularAccel, p, st, hRate);
 
         st.torqueNorm = torqueNorm;
         st.prevOmegaRate = x.Omega;
@@ -1673,26 +1683,46 @@ function [thrSp, Rd, st] = px4PositionControl(x, ref, velDot, par, st, dt)
 
     p = par.px4_iris;
 
+    % Position P loop:
+    %   velSp = v_d + posP .* (p_d-p).
     velSp = ref.v + (ref.p - x.p) .* p.posP;
+    % Velocity error:
+    %   velError = velSp - v.
     velError = velSp - x.v;
-    accSp = referenceAcceleration(ref, p) + velError .* p.velP ...
-        + st.velInt - velDot .* p.velD;
+    if p.useAccelerationFeedforward
+        accFF = ref.a;
+    else
+        accFF = zeros(3,1);
+    end
+    % Velocity PID+D acceleration setpoint:
+    %   accSp = accFF + velP.*velError + velInt - velD.*velDot.
+    accSp = accFF + velError .* p.velP + st.velInt - velDot .* p.velD;
     st.velSp = velSp;
     st.accSp = accSp;
 
+    % PX4 acceleration-control map: accSp -> normalized thrust vector.
     thrSp = px4AccelerationControl(accSp, p, par);
+    % Integral state:
+    %   velInt(k+1) = velInt(k) + velI.*velError*dt.
     st.velInt = st.velInt + velError .* p.velI * dt;
 
+    % Attitude setpoint from thrust direction and yaw.
     bodyZ = -thrSp;
     Rd = px4BodyZToAttitude(bodyZ, ref.psi);
 end
 
 function thrSp = px4AccelerationControl(accSp, p, par)
 
+    % PX4 specific-force direction:
+    %   zSpecificForce = -g + accSp_z
+    %   bodyZ = normalize([-accSp_x; -accSp_y; -zSpecificForce]).
     zSpecificForce = -par.g + accSp(3);
     bodyZ = [-accSp(1); -accSp(2); -zSpecificForce];
     bodyZ = bodyZ/norm(bodyZ);
 
+    % Normalized collective thrust with vertical acceleration compensation:
+    %   thrustNedZ = accSp_z*hoverThrust/g - hoverThrust
+    %   collectiveThrust = thrustNedZ/(e3'*bodyZ).
     thrustNedZ = accSp(3) * (p.hoverThrust/par.g) - p.hoverThrust;
     cosNedBody = dot(par.e3, bodyZ);
     collectiveThrust = thrustNedZ/cosNedBody;
@@ -1701,6 +1731,11 @@ end
 
 function Rd = px4BodyZToAttitude(bodyZ, yawSp)
 
+    % PX4 attitude construction:
+    %   bodyZ = normalize(bodyZ),
+    %   yC = [-sin(psi); cos(psi); 0],
+    %   bodyX = normalize(yC x bodyZ),
+    %   bodyY = bodyZ x bodyX.
     bodyZ = bodyZ/norm(bodyZ);
 
     % PX4 constrains the yaw heading through y_C instead of Lee/JB's b1 axis.
@@ -1716,30 +1751,39 @@ end
 
 function ratesSp = px4AttitudeControl(R, Rd, p)
 
-    q = rotmToQuatWXYZ(R);
-    qd = rotmToQuatWXYZ(Rd);
-    qError = normalizeQuatWXYZ(quatMultiplyWXYZ(quatConjugateWXYZ(q), qd));
+    % Quaternion attitude error:
+    %   qe = q(R)^(-1) * q(Rd), qe_w >= 0.
+    q = rotm2quat(R).';
+    qd = rotm2quat(Rd).';
+    qError = quatnormalize(quatmultiply([q(1), -q(2:4).'], qd.')).';
     if qError(1) < 0
         qError = -qError;
     end
 
+    % PX4 attitude P law:
+    %   ratesSp = 2*qe_xyz .* attP, then apply rate limits.
     ratesSp = 2*qError(2:4) .* p.attP;
     ratesSp = saturateVector(ratesSp, getStructField(p, 'rateLimit', inf));
 end
 
 function [torqueNorm, st] = px4RateControl( ...
-        rates, ratesSp, angularAccel, par, p, st, dt)
+        rates, ratesSp, angularAccel, p, st, dt)
 
+    % Rate error:
+    %   eRate = ratesSp - rates.
     rateError = ratesSp - rates;
+    % PX4 rate PID in normalized torque units:
+    %   torqueNorm = P.*eRate + I - D.*OmegaDot + FF.*ratesSp.
     torqueNorm = p.rateP .* rateError + st.rateInt ...
         - p.rateD .* angularAccel + p.rateFF .* ratesSp;
 
     for i = 1:3
+        % PX4 integrator attenuation near large rate errors, then clamp.
         iFactor = rateError(i)/deg2rad(400);
         iFactor = max(0, 1 - iFactor^2);
         nextInt = st.rateInt(i) + iFactor*p.rateI(i)*rateError(i)*dt;
-        st.rateInt(i) = clampScalar(nextInt, ...
-            -p.rateIntLimit(i), p.rateIntLimit(i));
+        st.rateInt(i) = min(max(nextInt, -p.rateIntLimit(i)), ...
+            p.rateIntLimit(i));
     end
 end
 
@@ -1747,6 +1791,21 @@ function u = controllerJohnson(x, ref, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   p_dot = v
+    %   v_dot = g*e3 - T/m*R*e3
+    %   R_dot = R*hat(Omega)
+    %   J*Omega_dot = tau - Omega x J*Omega
+    % Johnson and Beard Eq. (13), (18)-(21):
+    %   ea = [p-p_d; v-v_d; integral(p-p_d)]
+    %   fd = -K*ea + m*(a_d-g*e3)
+    %   k_d = -fd/||fd||, T = ||fd||
+    %   r = Log(R'*Rid)
+    %   tau = Omega x J*Omega + J*omegaDotD_B
+    %         + Jl(r)'*Kr*r + Komega*(R'*Rid*omegaD-Omega).
+    ref = completeReferenceDerivatives(ref);
+
+    % Johnson translational errors: ep = p-p_d, ev = v-v_d.
     ep = x.p - ref.p;
     ev = x.v - ref.v;
 
@@ -1756,81 +1815,77 @@ function u = controllerJohnson(x, ref, t, par)
     end
 
     h = max(t - st.t, par.dt);
+    % Integral error state: eI_dot = ep.
     st.eInt = st.eInt + h*ep;
 
+    % Augmented LQR state: ea = [ep; ev; eI].
     ea = [ep; ev; st.eInt];
-    cmd = johnsonCommand(x, ea, ref, par);
-    Rd = cmd.Rid;
-    omegaD = cmd.omegaD;
-    omegaDotD = cmd.omegaDotD;
+    K = johnsonPositionGain(par);
 
-    Rbd = x.R' * Rd;
+    % Desired force:
+    %   fEq = m*(a_d-g*e3), fTilde = -K*ea, fd = fTilde + fEq.
+    fEq = par.m*(ref.a - par.g*par.e3);
+    fTilde = -K*ea;
+    fd = fTilde + fEq;
+    % Johnson Eq. (19a): body +z_B axis uses k_d = -fd/||fd||.
+    bodyZVector = -fd;
+    T = norm(fd);
+
+    % Desired attitude: b3d = -fd/||fd||, then impose yaw.
+    b3d = bodyZVector/norm(bodyZVector);
+    [xC, xCDot, xCDDot] = headingAxisFromYaw(ref);
+    Rid = attitudeFromUnitBodyZAndHeading(b3d, xC);
+
+    % 3. Desired attitude derivatives: differentiate the same body +z_B
+    % vector and yaw-heading chain, then map Rid_dot/Rid_ddot to omega_d.
+    b3 = x.R*par.e3;
+    b3Dot = x.R*hat(x.Omega)*par.e3;
+    % Closed-loop acceleration:
+    %   a = g*e3 - T/m*b3.
+    aActual = par.g*par.e3 - T/par.m*b3;
+    % eaDot = [ev; a-a_d; ep].
+    eaDot = [ev; aActual - ref.a; ep];
+    % fdDot = -K*eaDot + m*j_d.
+    fdDot = -K*eaDot + par.m*ref.j;
+    bodyZVectorDot = -fdDot;
+    % T = ||fd|| = ||-bodyZVector||, so TDot = b3d'*bodyZVectorDot.
+    TDot = dot(b3d, bodyZVectorDot);
+    % aDot = -TDot/m*b3 - T/m*b3Dot.
+    aActualDot = -TDot/par.m*b3 - T/par.m*b3Dot;
+    % eaDDot = [a-a_d; aDot-j_d; ev].
+    eaDDot = [aActual - ref.a; aActualDot - ref.j; ev];
+    % fdDDot = -K*eaDDot + m*s_d.
+    fdDDot = -K*eaDDot + par.m*ref.s;
+    bodyZVectorDDot = -fdDDot;
+
+    [b3d, b3dDot, b3dDDot] = unitVectorDerivativesFromVector( ...
+        bodyZVector, bodyZVectorDot, bodyZVectorDDot);
+    [RidDot, RidDDot] = attitudeDerivativesFromUnitBodyZAndHeading( ...
+        b3d, b3dDot, b3dDDot, xC, xCDot, xCDDot);
+    omegaD = vee(Rid' * RidDot);
+    omegaDotD = vee(Rid' * RidDDot - hat(omegaD)*hat(omegaD));
+
+    Rbd = x.R' * Rid;
+    % SO(3) errors: r = Log(R'*Rid),
+    % omegaErr = R'*Rid*omegaD - Omega.
     r = johnsonLogSO3(Rbd);
     omegaDInBody = Rbd * omegaD;
     omegaErr = omegaDInBody - x.Omega;
+    % Body-frame reference angular acceleration:
+    % omegaDotD_B = R'*Rid*omegaDotD - Omega x (R'*Rid*omegaD).
     omegaDotDInBody = Rbd * omegaDotD - hat(x.Omega)*omegaDInBody;
 
     Jl = johnsonLeftJacobianSO3(r);
-    % Johnson and Beard Eq. (21)-(23), (29)-(32).
+    % Johnson and Beard Eq. (21)-(23), (29)-(32) torque law.
     tau = cross(x.Omega, par.J*x.Omega) ...
         + par.J*omegaDotDInBody ...
         + Jl' * par.johnson.Kr*r ...
         + par.johnson.Komega*omegaErr;
 
-    u = controlAllocation([cmd.T; tau], Rd, par);
+    u = controlAllocation([T; tau], Rid, par);
     u.OmegaD = omegaDInBody;
     u.alphaD = omegaDotDInBody;
     st.t = t;
-end
-
-function cmd = johnsonCommand(x, ea, ref, par)
-
-    % Johnson and Beard Eq. (13), (18)-(21): the LQR block computes f_d,
-    % then the desired-rotation block aligns the body k-axis with -f_d.
-    ref = completeReferenceDerivatives(ref);
-
-    K = johnsonPositionGain(par);
-
-    fEq = par.m*(ref.a - par.g*par.e3);
-    fTilde = -K*ea;
-    fd = fTilde + fEq;
-    T = norm(fd);
-
-    [fdDot, fdDDot] = johnsonDesiredForceDerivatives( ...
-        x, ref, ea, fd, T, K, par);
-
-    [xC, xCDot, xCDDot] = yawHeadingAxis(ref);
-    [Rid, RidDot, RidDDot] = attitudeFromBodyZAndHeading( ...
-        -fd, -fdDot, -fdDDot, xC, xCDot, xCDDot);
-
-    omegaD = vee(Rid' * RidDot);
-    omegaDotD = vee(Rid' * RidDDot - hat(omegaD)*hat(omegaD));
-
-    cmd.fd = fd;
-    cmd.T = T;
-    cmd.Rid = Rid;
-    cmd.omegaD = omegaD;
-    cmd.omegaDotD = omegaDotD;
-end
-
-function [fdDot, fdDDot] = johnsonDesiredForceDerivatives( ...
-        x, ref, ea, fd, T, K, par)
-
-    % Same analytic closed-loop derivative chain as Lee's A calculation,
-    % written in Johnson's fd notation. For PD gains, fd=-F_Lee.
-    ep = ea(1:3);
-    ev = ea(4:6);
-    b3 = x.R*par.e3;
-    b3Dot = x.R*hat(x.Omega)*par.e3;
-
-    accel = par.g*par.e3 - T/par.m*b3;
-    eaDot = [ev; accel - ref.a; ep];
-    fdDot = -K*eaDot + par.m*ref.j;
-
-    TDot = dot(fd, fdDot)/T;
-    accelDot = -TDot/par.m*b3 - T/par.m*b3Dot;
-    eaDDot = [accel - ref.a; accelDot - ref.j; ev];
-    fdDDot = -K*eaDDot + par.m*ref.s;
 end
 
 function K = johnsonPositionGain(par)
@@ -1901,10 +1956,16 @@ function ff = talFlatnessReference(ref, par)
     % signed specific thrust tau. Therefore tau_ref*b_z,ref = a_ref - g*e3.
     ref = completeReferenceDerivatives(ref);
 
+    % Specific-thrust vector in Tal's sign convention:
+    %   tau_ref*b3_ref = a_ref - g*e3.
     tauVector = ref.a - par.g*par.e3;
     tauMag = norm(tauVector);
+    % Benchmark body +z axis is opposite the thrust acceleration direction:
+    %   b3_ref = -(a_ref-g*e3)/||a_ref-g*e3||.
     b3 = -tauVector/tauMag;
 
+    % Yaw completion:
+    %   b2 = normalize(b3 x b1Yaw), b1 = b2 x b3.
     b1Yaw = [cos(ref.psi); sin(ref.psi); 0];
     b2 = cross(b3, b1Yaw);
     b2 = b2/norm(b2);
@@ -1920,6 +1981,15 @@ function u = controllerTal(x, ref, ~, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   Paper model: v_dot = g*i_z + tau*b_z + f_ext/m, tau < 0 for lift.
+    %   Benchmark model: v_dot = g*e3 - T/m*R*e3, so tau = -T/m.
+    %   aCmd = Kp*(p_d-p) + Kv*(v_d-v) + Ka*(a_d-a_f) + a_d
+    %   (tau*b_z)_c = (tau*b_z)_f + aCmd - a_f
+    %   xi_e comes from the incremental attitude command.
+    %   OmegaDotCmd = Ktheta*xi_e + Komega*(Omega_ref-Omega_f)
+    %                 + alpha_ref
+    %   tauCmd = mu_f + J*(OmegaDotCmd-OmegaDot_f).
     % Tal and Karaman 2021, adapted to this MATLAB benchmark:
     % - Paper model uses NED and v_dot = g*i_z + tau*b_z + f_ext/m, where
     %   tau is the signed specific thrust. This benchmark instead outputs a
@@ -1961,8 +2031,8 @@ function u = controllerTal(x, ref, ~, t, par)
         rawOmegaF = x.Omega;
         [rawAFilt, rawOmegaDotF] = rigidBodyRates( ...
             x.R, x.v, x.Omega, st.uApplied, par, t);
-        % Previous applied force T [N] in current attitude -> paper's
-        % (tau*b_z)_f [m/s^2].
+        % Previous applied force T [N] in current attitude:
+        %   (tau*b_z)_f = -T_prev/m * R*e3.
         rawThrustAccelF = -st.T/par.m * x.R*par.e3;
         rawMuF = st.tau;
 
@@ -1978,9 +2048,8 @@ function u = controllerTal(x, ref, ~, t, par)
             rawMuF, st.muFilter, h, par.tal.filterCutoffHz);
     end
 
-    % Eq. (17): commanded acceleration with acceleration feedback. The paper
-    % uses LPF IMU acceleration a_f; here aFilt is the model-evaluated
-    % simulated acceleration filtered through the same LPF.
+    % Eq. (17): commanded acceleration with acceleration feedback:
+    %   aCmd = Kp*(p_d-p) + Kv*(v_d-v) + Ka*(a_d-a_f) + a_d.
     aCmd = par.tal.Kp*(ref.p - x.p) ...
          + par.tal.Kv*(ref.v - x.v) ...
          + par.tal.Ka*(ref.a - aFilt) ...
@@ -1988,7 +2057,8 @@ function u = controllerTal(x, ref, ~, t, par)
 
     % Eq. (20): INDI linear acceleration control. thrustAccelCmd is the
     % paper's vector (tau*b_z)_c. In this NED framework tau = -T/m, so the
-    % thrust acceleration vector is -T/m*b_z.
+    % thrust acceleration vector is -T/m*b_z:
+    %   thrustAccelCmd = thrustAccelF + aCmd - aFilt.
     thrustAccelCmd = thrustAccelF + aCmd - aFilt;
     [Rd, xiE, T] = talIncrementalAttitudeCommand(x.R, thrustAccelCmd, ref.psi, par);
 
@@ -1999,15 +2069,16 @@ function u = controllerTal(x, ref, ~, t, par)
     refDer = completeReferenceDerivatives(ref);
     [omegaRef, alphaRef] = talPaperFlatnessFeedforward(ff.R, ff.tau, refDer, par);
 
-    % Eq. (28): attitude/rate controller. xiE is Eq. (27), computed from the
-    % incremental quaternion command of Eq. (22)-(26).
+    % Eq. (28): attitude/rate controller:
+    %   omegaDotCmd = Ktheta*xiE + Komega*(omegaRef-omegaF) + alphaRef.
     omegaDotCmd = par.tal.Ktheta*xiE ...
                 + par.tal.Komega*(omegaRef - omegaF) ...
                 + alphaRef;
 
     % Eq. (31): INDI angular acceleration control. The paper uses filtered
     % motor-speed-derived moment mu_f; with direct moment actuation, muF is
-    % the LPF output of previous saturated equivalent moments [N*m].
+    % the LPF output of previous saturated equivalent moments [N*m]:
+    %   tau = muF + J*(omegaDotCmd-omegaDotF).
     tau = muF + par.J*(omegaDotCmd - omegaDotF);
 
     % Control allocation is benchmark-unified across controllers. Tal Eq.
@@ -2038,11 +2109,13 @@ function [Rd, xiE, T] = talIncrementalAttitudeCommand(R, thrustAccelCmd, psiRef,
     % Tal Eq. (21)-(27). thrustAccelCmd is (tau*b_z)_c in inertial NED.
     % Since tau is negative for upward thrust, the commanded body z axis is
     % b_z,c = -normalize((tau*b_z)_c).
+    % Eq. (22): express commanded thrust acceleration in the current body
+    % frame before constructing the incremental tilt quaternion.
     thrustDir = thrustAccelCmd/norm(thrustAccelCmd);
     thrustDirBody = R' * thrustDir;       % Eq. (22): (-b_z)_c in body frame.
 
     qTilt = talQuatAlignMinusE3(thrustDirBody);
-    RTilt = quatToRotmWXYZ(qTilt);
+    RTilt = quat2rotm(qTilt.');
     RIntermediate = R * RTilt;
 
     nPsi = [sin(psiRef); -cos(psiRef); 0];
@@ -2053,12 +2126,12 @@ function [Rd, xiE, T] = talIncrementalAttitudeCommand(R, thrustAccelCmd, psiRef,
     else
         k = -nBody(1)/nBody(2);
         qYaw = [1; 0; 0; k]; % Correct the original text of tal
-        qYaw = normalizeQuatWXYZ(qYaw);
+        qYaw = quatnormalize(qYaw.').';
     end
 
-    qCmd = quatMultiplyWXYZ(qTilt, qYaw); % Eq. (26): current to command.
-    qCmd = normalizeQuatWXYZ(qCmd);
-    RCmd = quatToRotmWXYZ(qCmd);
+    qCmd = quatmultiply(qTilt.', qYaw.').'; % Eq. (26): current to command.
+    qCmd = quatnormalize(qCmd.').';
+    RCmd = quat2rotm(qCmd.');
 
     Rd = R * RCmd;
     xiE = talQuatErrorVector(qCmd);       % Eq. (27).
@@ -2086,7 +2159,7 @@ function q = talQuatAlignMinusE3(vBody)
         q = [1; 0; 0; 0];
     else
         q = [1 - c; axis];
-        q = normalizeQuatWXYZ(q);
+        q = quatnormalize(q.').';
     end
 end
 
@@ -2191,6 +2264,17 @@ function u = controllerSunNMPC(x, ~, traj, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   Sun NMPC solves a finite-horizon OCP over
+    %     x = [xi; q; xidot; Omega^B],
+    %     u = [u1; u2; u3; u4] rotor thrusts.
+    %   Dynamics use
+    %     xi_dot = xidot,
+    %     xidot_dot = g*e3 - T/m*R*e3 + R*f_a^B/m,
+    %     R_dot = R*hat(Omega),
+    %     J*Omega_dot = tau - Omega x J*Omega,
+    %   where [T;tau] = G1*u. The first optimized actuator sample is mapped
+    %   back through the benchmark allocation/control object.
     % Sun NMPC state is x=[xi; q; xidot; Omega^B] in this implementation
     % (the paper writes the same components as [xi; xidot; q; Omega^B]).
     % The optimized input is rotor thrust u=[u1;u2;u3;u4], not [T;tau];
@@ -2228,6 +2312,8 @@ function u = controllerSunNMPC(x, ~, traj, t, par)
         return;
     end
 
+    % OCP control law: solve for the first actuator vector u0 over the
+    % horizon references [xi_r, q_r, v_r, Omega_r, u_r].
     pyResult = st.pySolver.solve( ...
         py.numpy.array(x0'), ...
         py.numpy.array(refs.p'), ...
@@ -2294,12 +2380,20 @@ function pySolver = sunEnsureAcadosPython(par)
             pyModule = py.importlib.import_module('sun_acados_nmpc');
         catch err
             pe = pyenv;
+            configuredPython = '<not configured>';
+            if isfield(par.sun, 'pythonExecutable') ...
+                    && strlength(string(par.sun.pythonExecutable)) > 0
+                configuredPython = char(par.sun.pythonExecutable);
+            end
             error(['sun_nmpc cannot import its Python/acados dependencies.\n' ...
                    'MATLAB is currently using Python:\n  %s\n' ...
-                   'Run setup_sun_acados_python once, then restart MATLAB ' ...
-                   'if pyenv Status is Loaded, and run main again.\n' ...
+                   'Configured acados Python:\n  %s\n' ...
+                   'Run install_acados once from the project root. ' ...
+                   'It creates/uses .venv and installs casadi/acados_template.\n' ...
+                   'If MATLAB has already loaded the wrong Python, restart ' ...
+                   'MATLAB after setup and run main again.\n' ...
                    'Original import error:\n%s'], ...
-                  char(pe.Executable), err.message);
+                  char(pe.Executable), configuredPython, err.message);
 	        end
 	    end
 
@@ -2340,13 +2434,17 @@ end
 
 function sunConfigurePythonForAcados(par)
 
-    if ~isfield(par.sun, 'pythonExecutable')
+    if ~isfield(par.sun, 'pythonExecutable') ...
+            || strlength(string(par.sun.pythonExecutable)) == 0
         return;
     end
 
     desiredPython = char(par.sun.pythonExecutable);
     if exist(desiredPython, 'file') ~= 2
-        return;
+        error(['Configured acados Python does not exist:\n  %s\n' ...
+               'Set ACADOS_PYTHON to a valid python3, or run ' ...
+               'install_acados to create the project .venv.'], ...
+              desiredPython);
     end
 
     pe = pyenv;
@@ -2370,7 +2468,7 @@ function sunConfigurePythonForAcados(par)
                'Prepared Python:\n  %s\n' ...
                'Restart MATLAB, then before running main execute:\n' ...
                '  pyenv(''Version'', ''%s'', ''ExecutionMode'', ''InProcess'')\n' ...
-               'Or run setup_sun_acados_python to install dependencies into ' ...
+               'Or run setup_acados_python to install dependencies into ' ...
                'the current Python.\nOriginal import error:\n%s'], ...
               currentPython, desiredPython, desiredPython, err.message);
     end
@@ -2404,7 +2502,7 @@ function refs = sunNMPCBuildReferences(traj, t, N, h, par)
         refs.p(:,k) = ref.p;
         refs.v(:,k) = ref.v;
         refs.R(:,:,k) = ff.R;
-        refs.q(:,k) = rotmToQuatWXYZ(ff.R);
+        refs.q(:,k) = rotm2quat(ff.R).';
         refs.Omega(:,k) = ff.Omega;
         refs.alpha(:,k) = ff.alpha;
         refs.T(k) = ff.T;
@@ -2420,7 +2518,7 @@ end
 function xVec = sunNMPCStateVector(x)
 
     xVec = [x.p;
-            rotmToQuatWXYZ(x.R);
+            rotm2quat(x.R).';
             x.v;
             x.Omega];
 end
@@ -2520,6 +2618,14 @@ end
 
 function u = controllerSunDFBC(x, ref, traj, t, par)
 
+    % Algorithm model/control law:
+    %   Sun DFBC uses the same plant model as NMPC but computes the command
+    %   explicitly:
+    %     accD = Kxi*(xi_d-xi) + Kv*(v_d-v) + xi_ddot_d,
+    %     T*R_d*e3 = m*(g*e3-accD) + R*f_a^B,
+    %     alphaD = Kq_red*q_red + kq_yaw*q_yaw
+    %              + KOmega*(OmegaR-Omega) + alphaR,
+    %     tauD = J*alphaD + Omega x J*Omega.
     cmd = sunDFBCCommand(x, ref, traj, t, par);
     u = sunActuatorToControl(cmd.actuator, cmd.Rd, par);
     u.OmegaD = cmd.OmegaR;
@@ -2530,6 +2636,11 @@ function u = controllerSunDFBCINDI(x, ref, traj, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   Outer loop is Sun DFBC. Inner loop applies Sun Eq. (32)-(35):
+    %     tauCmd = tau_f + J*(alphaD-alpha_f),
+    %   using filtered achieved actuator/moment feedback from the benchmark
+    %   allocation state.
     cmd = scheduledSample("sun_dfbc_indi_outer", t, ...
         par.control.innerPeriod, par, ...
         @() sunDFBCCommand(x, ref, traj, t, par));
@@ -2542,6 +2653,10 @@ function u = controllerSunNMPCINDI(x, ref, traj, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   Outer loop is Sun NMPC actuator command. The actuator command is
+    %   converted to achievable [T; alpha], then the same Sun Eq. (32)-(35)
+    %   INDI inner loop computes the final constrained actuator command.
     uMpc = controllerSunNMPC(x, ref, traj, t, par);
     cmd = sunCommandFromActuator(uMpc.actuator, uMpc.Rd, x, par);
     [u, st] = sunINDIActuatorControl(x, cmd, t, par, st);
@@ -2559,7 +2674,8 @@ function cmd = sunDFBCCommand(x, ref, ~, t, par)
 
     persistent st
 
-    % Sun et al. Eq. (13): desired acceleration from PD position feedback.
+    % Sun et al. Eq. (13): desired acceleration from PD position feedback:
+    %   accD = Kxi*(xi_d-xi) + Kv*(v_d-v) + xi_ddot_d.
     xiErr = ref.p - x.p;
     vErr = ref.v - x.v;
     accD = par.sun.Kxi*xiErr + par.sun.Kv*vErr + ref.a;
@@ -2567,8 +2683,8 @@ function cmd = sunDFBCCommand(x, ref, ~, t, par)
     % Sun et al. Eq. (14)-(17), converted from the paper's convention where
     % z_B is the thrust direction to this NED/FRD model where R*e3 is opposite
     % thrust: a = g*e3 - T/m*R*e3 + R*f_a^B/m. Thus
-    % T*R*e3 = m*(g*e3 - xi_ddot_d) + R*f_a^B.
-    fAeroWorld = sunAeroForceWorld(x.R, x.v, par);
+    %   T*Rd*e3 = m*(g*e3 - accD) + R*f_a^B.
+    fAeroWorld = x.R*sunAeroForceBody(x.R, x.v, par);
     thrustAxisForce = par.m*(par.g*par.e3 - accD) + fAeroWorld;
     [Rd, T] = sunDesiredAttitudeFromThrustVector(thrustAxisForce, ref.psi);
 
@@ -2587,9 +2703,9 @@ function cmd = sunDFBCCommand(x, ref, ~, t, par)
 
     % Sun et al. Eq. (25): for B-to-I attitude, use q_e = q^{-1} \otimes q_d
     % so the reduced/yaw tangent vectors below are body-local errors.
-    qd = rotmToQuatWXYZ(Rd);
-    q = rotmToQuatWXYZ(x.R);
-    qe = quatMultiplyWXYZ(quatConjugateWXYZ(q), qd);
+    qd = rotm2quat(Rd).';
+    q = rotm2quat(x.R).';
+    qe = quatmultiply([q(1), -q(2:4).'], qd.').';
     qe = qe/norm(qe);
 
     % Sun et al. Eq. (26)-(27): split reduced-attitude and yaw errors.
@@ -2605,9 +2721,14 @@ function cmd = sunDFBCCommand(x, ref, ~, t, par)
         yawSign = -1;
     end
 
+    % Sun Eq. (28):
+    %   alphaD = KqRed*qRed + kqYaw*sign(qe_w)*qYaw
+    %            + KOmega*(OmegaR-Omega) + alphaR.
     alphaD = par.sun.KqRed*qRed + par.sun.kqYaw*yawSign*qYaw ...
            + par.sun.KOmega*(OmegaR - x.Omega) + alphaR;
 
+    % Rigid-body inversion:
+    %   tauDesired = J*alphaD + Omega x J*Omega.
     tauDesired = par.J*alphaD + cross(x.Omega, par.J*x.Omega);
     % Sun Eq. (31): constrained allocation from desired [T;tau] to rotor
     % thrust commands. Use the benchmark-unified allocation implementation;
@@ -2631,6 +2752,9 @@ end
 
 function cmd = sunCommandFromActuator(actuator, Rd, x, par)
 
+    % Convert an already selected actuator vector back to the command form
+    % used by Sun INDI:
+    %   alpha = J \ (tau - Omega x J*Omega).
     u = sunActuatorToControl(actuator, Rd, par);
     cmd.actuator = u.actuator;
     cmd.T = u.T;
@@ -2661,8 +2785,6 @@ function [u, st] = sunINDIActuatorControl(x, cmd, t, par, st)
 
     resetState = isempty(st) || t <= par.dt/2 || t <= st.t;
     if resetState
-        omegaDotF = zeros(3,1);
-        actuatorF = cmd.actuator;
         st = struct;
         st.omegaFilter = initSecondOrderLPF(x.Omega);
         st.actuatorFilter = initSecondOrderLPF(cmd.actuator);
@@ -2690,9 +2812,13 @@ function [u, st] = sunINDIActuatorControl(x, cmd, t, par, st)
         st.omegaF = omegaF;
     end
 
+    % Filtered achieved wrench from filtered actuator thrusts:
+    %   muF = G1*uF = [TF; tauF].
     muF = sunAllocationMatrix(par)*actuatorF;
     tauF = muF(2:4);
 
+    % Sun Eq. (33)-(35) in benchmark wrench variables:
+    %   mu = [Tcmd; tauF + J*(alphaCmd-omegaDotF)].
     mu = zeros(4,1);
     mu(1) = cmd.T;
     mu(2:4) = tauF + par.J*(cmd.alpha - omegaDotF);
@@ -2775,13 +2901,20 @@ function u = controllerLu(x, ref, traj, t, par)
     solveDue = resetState || t + 0.5*par.dt >= st.nextSolveTime;
 
     if solveDue
+        % Reference input on M = R3 x R3 x SO(3):
+        %   u_d = [aT_d; Omega_d].
         [Rd, aTd, OmegaD] = referenceInputOnManifold(ref, par);
 
+        % Lu Eq. (13): solve for the first input-error command delta u_0.
         refs = onManifoldMPCReferences(ref, traj, t, par);
         du = solveOnManifoldMPC(x, refs, par);
 
+        % Apply the MPC input error:
+        %   [aT_cmd; Omega_cmd] = [aT_d; Omega_d] + delta u_0.
         aTCmd = aTd + du(1);
         OmegaCmd = OmegaD + du(2:4);
+        % Physical input bounds:
+        %   0 <= aT_cmd <= Tmax/m, ||Omega_cmd||_inf <= omegaMax.
         aTCmd = min(max(aTCmd, 0), par.Tmax/par.m);
         OmegaCmd = saturateVector(OmegaCmd, par.lu.omegaMax);
 
@@ -2798,7 +2931,8 @@ function u = controllerLu(x, ref, traj, t, par)
     % Lu Eq. (14)-(16) outputs thrust acceleration and body rate. The
     % Lu-local rate adapter below tracks Omega_cmd and returns physical
     % torque; allocation is the same physical [T;tau] path used by the other
-    % non-PX4 controllers.
+    % non-PX4 controllers:
+    %   T = m*aT_cmd.
     tau = luMpcRateLoop(x, OmegaCmd, t, par);
     u = controlAllocation([par.m*aTCmd; tau], Rd, par);
     u.OmegaD = OmegaCmd;
@@ -2810,6 +2944,10 @@ function tau = luMpcRateLoop(x, OmegaCmd, t, par)
 
     persistent st
 
+    % Lu-local rate adapter model/control law:
+    %   eOmega = OmegaCmd - Omega
+    %   tau = Omega x J*Omega + rateP*eOmega + integral(rateI*eOmega)
+    %         - rateD*OmegaDot + rateFF*OmegaCmd.
     resetState = isempty(st) || t <= par.dt/2 || t <= st.t;
     if resetState
         st.rateInt = zeros(3,1);
@@ -2823,7 +2961,9 @@ function tau = luMpcRateLoop(x, OmegaCmd, t, par)
     rateDue = t + 0.5*par.dt >= st.nextRateTime;
     if rateDue
         h = max(t - st.rateT, par.lu.ratePeriod);
+        % Measured angular acceleration for the D term.
         angularAccel = (x.Omega - st.prevOmegaRate)/max(h, eps);
+        % Body-rate error: eOmega = OmegaCmd - Omega.
         rateError = OmegaCmd - x.Omega;
 
         rateP = matrix3(getStructField(par.lu, ...
@@ -2837,9 +2977,12 @@ function tau = luMpcRateLoop(x, OmegaCmd, t, par)
         intLimit = vector3(getStructField(par.lu, ...
             'rateIntLimit', inf(3,1)));
 
+        % Integral state with componentwise saturation.
         st.rateInt = st.rateInt + rateI*rateError*h;
         st.rateInt = min(max(st.rateInt, -intLimit), intLimit);
 
+        % Physical moment command:
+        %   tau = Omega x J*Omega + P*eOmega + I - D*OmegaDot + FF*OmegaCmd.
         tau = cross(x.Omega, par.J*x.Omega) ...
             + rateP*rateError + st.rateInt ...
             - rateD*angularAccel + rateFF*OmegaCmd;
@@ -2860,26 +3003,45 @@ function u = controllerGeometricINDI(x, ref, t, par)
 
     persistent st
 
+    % Algorithm model/control law:
+    %   Plant model:
+    %     v_dot = g*e3 - T/m*b3,  J*Omega_dot = tau - Omega x J*Omega.
+    %   Outer loop:
+    %     aCmd = Kp*(p_d-p) + Kv*(v_d-v) + a_d.
+    %   Incremental thrust-vector law, GINDI Eq. (55):
+    %     T*b3 = T0*b30 - m*(aCmd-vDot0).
+    %   Attitude/rate law:
+    %     OmegaDotCmd = Ktheta*Log(R'*Rd)
+    %                   + Komega*(OmegaRef-Omega) + alphaRef
+    %     tau = tau0 + J*(OmegaDotCmd-OmegaDot0).
     ref = completeReferenceDerivatives(ref);
+    % Position errors: ep = p_d-p, ev = v_d-v.
     ep = ref.p - x.p;
     ev = ref.v - x.v;
-    % GINDI Eq. (56).
+    % GINDI Eq. (56): aCmd = Kp*ep + Kv*ev + a_d.
     aCmd = par.geometric_indi.Kp*ep + par.geometric_indi.Kv*ev + ref.a;
 
     if isempty(st) || t <= par.dt/2
+        % First sample uses direct inversion:
+        %   thrustAxisForce = m*(g*e3-aCmd), T = ||thrustAxisForce||.
         thrustAxisForce = par.m*(par.g*par.e3 - aCmd);
-        T = norm(thrustAxisForce);
+        TForRates = norm(thrustAxisForce);
         cmd = geometricINDIReferenceCommand( ...
-            x, ref, thrustAxisForce, T, par);
+            x, ref, thrustAxisForce, TForRates, par);
+        T = cmd.T;
         Rd = cmd.Rd;
         omegaRefBody = cmd.omegaRefBody;
         alphaRefBody = cmd.alphaRefBody;
 
         rErr = LogSO3(x.R' * Rd);
         omegaErr = omegaRefBody - x.Omega;
+        % Initial angular acceleration command:
+        %   OmegaDotCmd = Ktheta*rErr + Komega*omegaErr + alphaRefBody.
         OmegaDotCmd = par.geometric_indi.Ktheta*rErr ...
                     + par.geometric_indi.Komega*omegaErr ...
                     + alphaRefBody;
+        % Direct rigid-body inversion for the first sample:
+        %   tau = Omega x J*Omega + J*OmegaDotCmd.
         tau = cross(x.Omega, par.J*x.Omega) + par.J*OmegaDotCmd;
         u = controlAllocation([T; tau], Rd, par);
         u.OmegaD = omegaRefBody;
@@ -2890,24 +3052,29 @@ function u = controllerGeometricINDI(x, ref, t, par)
     end
 
     h = max(t - st.t, par.dt);
+    % Measured increments:
+    %   vDot0 = (v-v0)/h, OmegaDot0 = (Omega-Omega0)/h.
     vDot0 = (x.v - st.v)/h;
     OmegaDot0 = (x.Omega - st.Omega)/h;
 
-    % GINDI Eq. (55): incremental virtual thrust-vector command.
+    % GINDI Eq. (55): incremental virtual thrust-vector command:
+    %   T_b_z = T0*b30 - m*(aCmd-vDot0).
     T_b_z0 = st.T * st.R*par.e3;
     T_b_z = T_b_z0 - par.m*(aCmd - vDot0);
-    T = norm(T_b_z);
     cmd = geometricINDIReferenceCommand( ...
         x, ref, T_b_z, st.T, par);
+    T = cmd.T;
     Rd = cmd.Rd;
     omegaRefBody = cmd.omegaRefBody;
     alphaRefBody = cmd.alphaRefBody;
 
     rErr = LogSO3(x.R' * Rd);
+    % GINDI Eq. (61): commanded angular acceleration.
     OmegaDotCmd = par.geometric_indi.Ktheta*rErr ...
                 + par.geometric_indi.Komega*(omegaRefBody - x.Omega) ...
                 + alphaRefBody;
 
+    % GINDI Eq. (60): incremental moment command.
     tau = st.tau + par.J*(OmegaDotCmd - OmegaDot0);
 
     u = controlAllocation([T; tau], Rd, par);
@@ -2923,9 +3090,32 @@ function cmd = geometricINDIReferenceCommand( ...
     % Sun Eq. (14)-(17) gives the same thrust-axis/yaw attitude construction
     % used by this GINDI path. For reference angular velocity and angular
     % acceleration, Sun Eq. (18)-(24) is better than the Tal route here.
-    [Rd, T] = sunDesiredAttitudeFromThrustVector(thrustAxisForce, ref.psi);
-    [omegaRefBody, alphaRefBody] = sunFlatnessReferenceRates( ...
-        x, ref, TForRates, par);
+    T = norm(thrustAxisForce);
+    if T < 1e-9
+        % First singularity: the thrust axis is not defined. Keep the
+        % current attitude; desired angular velocity and acceleration are 0.
+        Rd = x.R;
+        omegaRefBody = zeros(3,1);
+        alphaRefBody = zeros(3,1);
+    else
+        b3d = thrustAxisForce/T;
+        xC = [cos(ref.psi); sin(ref.psi); 0];
+        if norm(cross(b3d, xC)) < 1e-8
+            % Second singularity: use the same fallback heading as the
+            % initial-attitude construction.
+            xC = [0; 1; 0];
+        end
+        Rd = attitudeFromUnitBodyZAndHeading(b3d, xC);
+        if TForRates < 1e-9
+            % The flatness rate map contains 1/T. If the measured/reference
+            % thrust used for rates is singular, keep rates at zero.
+            omegaRefBody = zeros(3,1);
+            alphaRefBody = zeros(3,1);
+        else
+            [omegaRefBody, alphaRefBody] = sunFlatnessReferenceRates( ...
+                x, ref, TForRates, par);
+        end
+    end
 
     cmd.Rd = Rd;
     cmd.T = T;
@@ -3185,25 +3375,6 @@ function ff = luFlatnessReference(ref, par)
     ff.alpha = alpha;
 end
 
-function ff = geometricFlatnessReference(ref, par)
-
-    ref = completeReferenceDerivatives(ref);
-
-    % Lee Eq. (14), Johnson-Beard Eq. (19), Sun Eq. (14)-(17), in this
-    % benchmark's NED coordinates: F_b3 = m*(g*e3 - a_ref).
-    F = par.m*(par.g*par.e3 - ref.a);
-    FDot = -par.m*ref.j;
-    FDDot = -par.m*ref.s;
-
-    [R, T, Omega, alpha] = attitudeFromThrustDerivatives( ...
-        F, FDot, FDDot, ref.psi, ref.psiDot, ref.psiDDot, par);
-
-    ff.R = R;
-    ff.T = T;
-    ff.c = T/par.m;
-    ff.Omega = Omega;
-    ff.alpha = alpha;
-end
 
 function ff = sunAeroFlatnessReference(ref, par)
 
@@ -3219,7 +3390,7 @@ function ff = sunAeroFlatnessReference(ref, par)
             break;
         end
 
-        aeroForceWorld = sunAeroForceWorld(R, ref.v, par);
+        aeroForceWorld = R*sunAeroForceBody(R, ref.v, par);
         thrustAxisForce = par.m*(par.g*par.e3 - ref.a) + aeroForceWorld;
         [R, T, Omega, alpha] = sunAttitudeFromThrustDerivatives( ...
             thrustAxisForce, -par.m*ref.j, -par.m*ref.s, ...
@@ -3240,7 +3411,7 @@ function [R, T, Omega, alpha] = sunAttitudeFromThrustDerivatives( ...
     % Sun Eq. (14)-(17), differentiated analytically for NMPC references.
     % The paper mapping is used as-is; singular force/heading cases are not
     % regularized here.
-    [zBd, zBdDot, zBdDDot] = sunNormalizeWithDerivatives( ...
+    [zBd, zBdDot, zBdDDot] = unitVectorDerivativesFromVector( ...
         thrustAxisForce, thrustAxisForceDot, thrustAxisForceDDot);
     T = norm(thrustAxisForce);
 
@@ -3252,7 +3423,7 @@ function [R, T, Omega, alpha] = sunAttitudeFromThrustDerivatives( ...
     yBdRawDot = cross(zBdDot, xCd) + cross(zBd, xCdDot);
     yBdRawDDot = cross(zBdDDot, xCd) ...
         + 2*cross(zBdDot, xCdDot) + cross(zBd, xCdDDot);
-    [yBd, yBdDot, yBdDDot] = sunNormalizeWithDerivatives( ...
+    [yBd, yBdDot, yBdDDot] = unitVectorDerivativesFromVector( ...
         yBdRaw, yBdRawDot, yBdRawDDot);
 
     xBd = cross(yBd, zBd);
@@ -3268,165 +3439,16 @@ function [R, T, Omega, alpha] = sunAttitudeFromThrustDerivatives( ...
     alpha = vee(R' * RDDot - hat(Omega)*hat(Omega));
 end
 
-function [u, uDot, uDDot] = sunNormalizeWithDerivatives(x, xDot, xDDot)
-
-    r = norm(x);
-    u = x/r;
-    rDot = dot(u, xDot);
-    uDot = (xDot - u*rDot)/r;
-    rDDot = dot(uDot, xDot) + dot(u, xDDot);
-    uDDot = (xDDot - u*rDDot - 2*rDot*uDot)/r;
-end
-
-function [Omega, alpha] = geometricFeedforwardInDesiredFrame(ref, Rd, par)
-
-    ff = geometricFlatnessReference(ref, par);
-
-    % Special handling for cascaded controllers: the paper feed-forward
-    % rates come from the flat-output reference, while Rd may include
-    % position feedback. Rotate the analytic reference rates into the
-    % commanded desired frame and let attitude feedback close the remainder.
-    RRefToDesired = Rd' * ff.R;
-    Omega = RRefToDesired * ff.Omega;
-    alpha = RRefToDesired * ff.alpha;
-end
-
-function [R, T, Omega, alpha] = attitudeFromThrustDerivatives( ...
-        thrustAxisForce, thrustAxisForceDot, thrustAxisForceDDot, ...
-        psi, psiDot, psiDDot, par)
-
-    if norm(thrustAxisForce) < 1e-9
-        % Special handling: the flatness attitude is undefined for zero
-        % thrust-axis force. Use level hover and zero feed-forward rates.
-        thrustAxisForce = par.m*par.g*par.e3;
-        thrustAxisForceDot = zeros(3,1);
-        thrustAxisForceDDot = zeros(3,1);
-    end
-
-    [b3, b3Dot, b3DDot] = normalizedVectorDerivatives( ...
-        thrustAxisForce, thrustAxisForceDot, thrustAxisForceDDot);
-    T = norm(thrustAxisForce);
-
-    headingAxis = [cos(psi); sin(psi); 0];
-    headingAxisDot = psiDot*[-sin(psi); cos(psi); 0];
-    headingAxisDDot = psiDDot*[-sin(psi); cos(psi); 0] ...
-                    - psiDot^2*headingAxis;
-
-    b2Raw = cross(b3, headingAxis);
-    b2RawDot = cross(b3Dot, headingAxis) + cross(b3, headingAxisDot);
-    b2RawDDot = cross(b3DDot, headingAxis) ...
-        + 2*cross(b3Dot, headingAxisDot) + cross(b3, headingAxisDDot);
-
-    if norm(b2Raw) < 1e-8
-        % Special handling: yaw heading is parallel to the thrust axis.
-        % Match attitudeFromThrustDirection's fixed fallback heading and
-        % drop yaw derivatives because the yaw constraint is singular here.
-        headingAxis = [0; 1; 0];
-        headingAxisDot = zeros(3,1);
-        headingAxisDDot = zeros(3,1);
-        b2Raw = cross(b3, headingAxis);
-        b2RawDot = cross(b3Dot, headingAxis) + cross(b3, headingAxisDot);
-        b2RawDDot = cross(b3DDot, headingAxis) ...
-            + 2*cross(b3Dot, headingAxisDot) + cross(b3, headingAxisDDot);
-    end
-
-    if norm(b2Raw) < 1e-8
-        R = attitudeFromThrustDirection(b3, psi);
-        Omega = zeros(3,1);
-        alpha = zeros(3,1);
-        return;
-    end
-
-    [b2, b2Dot, b2DDot] = normalizedVectorDerivatives( ...
-        b2Raw, b2RawDot, b2RawDDot);
-    b1 = cross(b2, b3);
-    b1Dot = cross(b2Dot, b3) + cross(b2, b3Dot);
-    b1DDot = cross(b2DDot, b3) ...
-        + 2*cross(b2Dot, b3Dot) + cross(b2, b3DDot);
-
-    R = [b1, b2, b3];
-    RDot = [b1Dot, b2Dot, b3Dot];
-    RDDot = [b1DDot, b2DDot, b3DDot];
-
-    Omega = vee(R' * RDot);
-    alpha = vee(R' * RDDot - hat(Omega)*hat(Omega));
-end
-
-function [u, uDot, uDDot] = normalizedVectorDerivatives(x, xDot, xDDot)
-
-    r = norm(x);
-
-    if r < 1e-12
-        u = [1; 0; 0];
-        uDot = zeros(3,1);
-        uDDot = zeros(3,1);
-        return;
-    end
-
-    u = x/r;
-    rDot = dot(u, xDot);
-    uDot = (xDot - u*rDot)/r;
-    rDDot = dot(uDot, xDot) + dot(u, xDDot);
-    uDDot = (xDDot - u*rDDot - 2*rDot*uDot)/r;
-end
-
-function [Rd, T] = desiredAttitudeFromAccel(aCmd, psi, par, ~)
-
-%注意：有三类奇异点
-% 1.如果总推力为零，平移动力学不再约束姿态，R_d不是由平坦输出唯一决定的。——这也是算法特性，不要解决。
-% 比如 Mellinger 的微分平坦性求角速度公式中 hω 就含有 m/u1，因此 u1=0 时必然退化。
-% 
-% 2.第二类是 yaw 构造奇异。——我们不打算解决这个问题，我们认为这是算法特性。
-% 例如：定义x_C= [cos(yaw_r);sin(yaw_r);0],期望z轴 z_B x x_C 不能为0， 否则分母为零。z_B x x_C !=0时才能唯一确定 R。
-% 又例如tal，如果用ψ=atan2(^1_y,b^1_x),那么当 b1的水平投影为零时，yaw 不可定义。
-% 还有其他使用y_C= [-sin(yaw_r);cos(yaw_r);0]来定义yaw方向的，则在另一个方向有奇异性。
-% Tal 和 Karaman 的 S 矩阵中有rψTrψ这样的分母；当 bx在水平面的投影消失时，yaw rate 映射退化。
-% 
-% 3.第三类是轨迹光滑性不足或动力学不可行。若要计算角速度，需要位置至少三阶可导；——这个在我们这里似乎没问题？因为都是解析的基准曲线。
-% 若要计算角加速度，需要位置至少四阶可导，yaw 至少二阶可导。Tal 和 Karaman 明确要求 x_ref ∈ C^4、ψ_ref ∈ C^2。
-
-    T_b_z = -par.m*(aCmd - par.g*par.e3); % -f_d. desired force along body z_B
-    % 如果总推力为零，平移动力学不再约束姿态，R_d不是由平坦输出唯一决定的。
-    if norm(T_b_z) < 1e-9
-        T_b_z = par.m*par.g*par.e3; 
-    end
-
-    % T = dot(T_b_z, RCurrent*par.e3); % option 1: current-attitude projection
-    T = norm(T_b_z);                 % option 2: desired-force magnitude
-
-    Rd = attitudeFromThrustDirection(T_b_z/norm(T_b_z), psi);
-    % 这里需要解决norm(T_b_z)=0的问题，参考轨迹也需要解决这个问题，Mellinger 的角速度公式中 hω 就含有 m/u1，因此 u1=0 时必然退化。
-end
-
-function [Rd, T] = desiredAttitudeFromThrustVector(T_b_z, psi, par)
-
-    if norm(T_b_z) < 1e-9
-        T_b_z = par.m*par.g*par.e3;
-    end
-
-    T = norm(T_b_z);
-    Rd = attitudeFromThrustDirection(T_b_z/T, psi);
-end
-
-function Rd = attitudeFromThrustDirection(b3d, psi)
-
-    headingAxis = [cos(psi); sin(psi); 0];
-
-    b2raw = cross(b3d, headingAxis);
-
-    if norm(b2raw) < 1e-8
-        headingAxis = [0;1;0];
-        b2raw = cross(b3d, headingAxis);
-    end
-
-    b2d = b2raw/norm(b2raw);
-    b1d = cross(b2d, b3d);
-
-    Rd = [b1d, b2d, b3d];
-end
-
 %% ========================================================================
 %% Quadrotor model layer
+% Continuous-time plant model used by both integrators:
+%   p_dot = v
+%   R_dot = R*hat(Omega)
+%   p_ddot = g*e3 - T/m*R*e3 + (f_aero + f_dist)/m
+%   J*Omega_dot = tau + tau_dist - Omega x J*Omega
+% where p and v are in NED, R maps body to NED, Omega and tau are expressed
+% in the body frame, and body +z is the thrust-axis direction opposite the
+% generated thrust acceleration.
 function xNext = stepModel(x, u, par, t0)
 
     if nargin < 4
@@ -3508,7 +3530,7 @@ function [a, OmegaDot] = rigidBodyRates(R, v, Omega, u, par, t)
     end
 
     [forceDist, momentDist] = disturbanceAtTime(t, par);
-    fAeroWorld = sunAeroForceWorld(R, v, par);
+    fAeroWorld = R*sunAeroForceBody(R, v, par);
 
     a = par.g*par.e3 - u.T/par.m*R*par.e3 ...
         + (fAeroWorld + forceDist)/par.m;
@@ -3566,7 +3588,7 @@ function phi = LogSO3(R)
     % Tal Eq. (27). so3_log_map and manif both use the more robust path
     % matrix -> unit quaternion -> atan2 quaternion Log. The sign at exactly
     % pi is inherently ambiguous; qw >= 0 selects the principal branch.
-    q = rotmToQuatWXYZ(projectSO3(R));
+    q = rotm2quat(projectSO3(R)).';
     phi = quatLogVectorWXYZ(q);
 end
 
@@ -3585,66 +3607,9 @@ function Jl = leftJacobianSO3(phi)
         + (theta - sin(theta))/theta^3*Phi*Phi;
 end
 
-function q = rotmToQuatWXYZ(R)
-
-    tr = trace(R);
-
-    if tr > 0
-        s = sqrt(max(tr + 1.0, 0))*2;
-        qw = 0.25*s;
-        qx = (R(3,2) - R(2,3))/s;
-        qy = (R(1,3) - R(3,1))/s;
-        qz = (R(2,1) - R(1,2))/s;
-    elseif R(1,1) > R(2,2) && R(1,1) > R(3,3)
-        s = sqrt(max(1.0 + R(1,1) - R(2,2) - R(3,3), 0))*2;
-        qw = (R(3,2) - R(2,3))/s;
-        qx = 0.25*s;
-        qy = (R(1,2) + R(2,1))/s;
-        qz = (R(1,3) + R(3,1))/s;
-    elseif R(2,2) > R(3,3)
-        s = sqrt(max(1.0 + R(2,2) - R(1,1) - R(3,3), 0))*2;
-        qw = (R(1,3) - R(3,1))/s;
-        qx = (R(1,2) + R(2,1))/s;
-        qy = 0.25*s;
-        qz = (R(2,3) + R(3,2))/s;
-    else
-        s = sqrt(max(1.0 + R(3,3) - R(1,1) - R(2,2), 0))*2;
-        qw = (R(2,1) - R(1,2))/s;
-        qx = (R(1,3) + R(3,1))/s;
-        qy = (R(2,3) + R(3,2))/s;
-        qz = 0.25*s;
-    end
-
-    q = [qw; qx; qy; qz];
-    q = normalizeQuatWXYZ(q);
-end
-
-function R = quatToRotmWXYZ(q)
-
-    q = normalizeQuatWXYZ(q);
-    w = q(1);
-    x = q(2);
-    y = q(3);
-    z = q(4);
-
-    R = [1 - 2*(y*y + z*z), 2*(x*y - z*w),     2*(x*z + y*w);
-         2*(x*y + z*w),     1 - 2*(x*x + z*z), 2*(y*z - x*w);
-         2*(x*z - y*w),     2*(y*z + x*w),     1 - 2*(x*x + y*y)];
-end
-
-function q = normalizeQuatWXYZ(q)
-
-    nq = norm(q);
-    if nq < 1e-12
-        q = [1; 0; 0; 0];
-    else
-        q = q/nq;
-    end
-end
-
 function phi = quatLogVectorWXYZ(q)
 
-    q = normalizeQuatWXYZ(q);
+    q = quatnormalize(q.').';
     if q(1) < 0
         q = -q;
     end
@@ -3661,22 +3626,6 @@ function phi = quatLogVectorWXYZ(q)
     end
 
     phi = scale*v;
-end
-
-function qc = quatConjugateWXYZ(q)
-
-    qc = [q(1); -q(2:4)];
-end
-
-function q = quatMultiplyWXYZ(a, b)
-
-    aw = a(1);
-    av = a(2:4);
-    bw = b(1);
-    bv = b(2:4);
-
-    q = [aw*bw - dot(av, bv);
-         aw*bv + bw*av + cross(av, bv)];
 end
 
 function st = initSecondOrderLPF(raw)
@@ -3728,20 +3677,4 @@ function y = saturateVector(x, xmax)
     else
         y = min(max(x, -xmax), xmax);
     end
-end
-
-function eul = rotm2eulZYX(R)
-
-    yaw = atan2(R(2,1), R(1,1));
-
-    s = -R(3,1);
-    s = min(1, max(-1, s));
-    pitch = asin(s);
-
-    roll = atan2(R(3,2), R(3,3));
-
-    eul = [roll; pitch; yaw];
-end
-function ang = wrapToPiLocal(ang)
-    ang = atan2(sin(ang), cos(ang));
 end

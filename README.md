@@ -24,14 +24,20 @@ Run the disturbance benchmark:
 main_disturbance_benchmark
 ```
 
-The default `main.m` controller is currently:
+`main.m` currently defaults to:
+
+```matlab
+par.controllerName = "px4_iris";
+```
+
+To run Sun et al. NMPC in a single case, set:
 
 ```matlab
 par.controllerName = "sun_nmpc";
 ```
 
-This is the acados-backed Sun et al. NMPC path. It is not a pure MATLAB
-implementation.
+`main_trajectory_sweep.m` is configured to sweep `sun_nmpc` by default.
+The Sun NMPC path is acados-backed; it is not a pure MATLAB implementation.
 
 Sun NMPC Dependency Setup
 -------------------------
@@ -52,40 +58,88 @@ MATLAB main.m
 Required external tools:
 
 - MATLAB with Python support.
-- Python packages: `casadi`, `scipy`, `matplotlib`, `cython`, `Deprecated`.
-- acados source/build tree.
-- acados `t_renderer` binary.
+- Command-line tools: `git`, `cmake`, and a C/C++ compiler.
 
-The helper script installs the Python packages into the Python environment used
-by MATLAB:
+Recommended one-command acados install from MATLAB:
 
 ```matlab
-setup_sun_acados_python
+install_acados
 ```
 
-If your acados checkout is not at `/private/tmp/acados`, set:
+This clones and builds acados, creates `.venv`, installs Python packages
+(`casadi`, `scipy`, `matplotlib`, `cython`, `Deprecated`, `acados_template`),
+downloads `bin/t_renderer`, and runs a short `sun_nmpc` smoke test to verify
+that this repository can call the generated acados solver. To skip that final
+algorithm-level check:
+
+```matlab
+install_acados("RunSunSmokeTest", false)
+```
+
+The default install is repository-local and ignored by git:
+
+```text
+.acados/acados   acados source/build/install tree
+.venv            Python environment used by MATLAB
+```
+
+The installer chooses platform-specific CMake options automatically. On Apple
+Silicon it uses `BLASFEO_TARGET=ARMV8A_APPLE_M1` and
+`CMAKE_OSX_ARCHITECTURES=arm64`; on x86_64 it uses acados'
+`X64_AUTOMATIC` target.
+
+The runtime code looks for Python in this order:
+
+1. `ACADOS_PYTHON`, when explicitly set.
+2. Legacy `SUN_NMPC_PYTHON`, when explicitly set.
+3. `.venv/bin/python3` under this repository.
+4. MATLAB's current/default Python, only if no project Python exists.
+
+Manual install, if you do not want to use `install_acados`:
 
 ```bash
-export ACADOS_SOURCE_DIR=/path/to/acados
+mkdir -p .acados
+git clone --depth 1 --recurse-submodules https://github.com/acados/acados.git .acados/acados
+cmake -S .acados/acados -B .acados/acados/build -DACADOS_WITH_QPOASES=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=.acados/acados
+cmake --build .acados/acados/build --target install -j4
 ```
 
-If MATLAB should use a specific Python executable, set:
+On Apple Silicon, add these CMake options to avoid accidentally building x86_64
+libraries:
 
 ```bash
-export SUN_NMPC_PYTHON=/path/to/python3
+-DBLASFEO_TARGET=ARMV8A_APPLE_M1 -DCMAKE_OSX_ARCHITECTURES=arm64
 ```
 
-If acados is missing, install it first:
+For a non-default acados path, set it inside MATLAB before setup, especially
+when MATLAB is opened from the macOS Dock:
 
-```bash
-git clone --depth 1 --recurse-submodules https://github.com/acados/acados.git /private/tmp/acados
-cmake -S /private/tmp/acados -B /private/tmp/acados/build -DACADOS_WITH_QPOASES=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build /private/tmp/acados/build --target install -j4
+```matlab
+setenv("ACADOS_SOURCE_DIR", "/path/to/acados")
 ```
 
-Then run `setup_sun_acados_python` from MATLAB. If MATLAB already loaded a
-different Python environment before dependencies were installed, restart MATLAB
-after running the setup script.
+Then start MATLAB, `cd` to this repository, and run:
+
+```matlab
+setup_acados_python
+```
+
+The setup script creates `.venv` when needed, installs the Python packages into
+that environment, installs `acados_template` from your acados checkout, and
+downloads `bin/t_renderer` when it is missing.
+
+If you want MATLAB to use a specific Python instead of `.venv`, set this before
+running MATLAB or before calling `setup_acados_python`:
+
+```matlab
+setenv("ACADOS_PYTHON", "/path/to/python3")
+```
+
+If you see an error like `No module named 'casadi'` and MATLAB reports
+`/Applications/Xcode.app/.../python3`, MATLAB has already loaded the wrong
+Python. Run `install_acados`, restart MATLAB, `cd` back to this
+repository, and run `main` or `main_trajectory_sweep` again. Parallel workers
+also use the same `.venv/bin/python3` path after restart.
 
 Current Sun NMPC Architecture
 -----------------------------

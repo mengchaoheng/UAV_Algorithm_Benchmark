@@ -16,9 +16,9 @@ function figureFiles = plot_main(varargin)
 
     figs = gobjects(0,1);
     if opts.plotStateDetail
-        figs(end+1,1) = plotStateDetailFigure(time, log, par); %#ok<AGROW>
+        figs(end+1,1) = plotStateDetailFigure(time, log, par); 
     end
-    figs(end+1,1) = plotTrajectory3D(time, log, par, traj, opts); %#ok<AGROW>
+    figs(end+1,1) = plotTrajectory3D(time, log, par, traj, opts); 
 
     figureFiles = strings(0,1);
     if opts.savePlots

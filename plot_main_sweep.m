@@ -165,7 +165,7 @@ function data = loadSweepRunData(results)
         if strlength(results.ErrorMessage(i)) == 0 && isfile(matFile)
             S = load(matFile, 'time', 'log', 'par', 'traj');
             S.label = shortTrajectoryLabel(results.Trajectory(i));
-            data(end+1) = S; %#ok<AGROW>
+            data(end+1) = S; 
         end
     end
 end

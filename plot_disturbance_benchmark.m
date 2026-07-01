@@ -60,7 +60,7 @@ function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
             continue;
         end
 
-        fig = figure('Color', 'w', 'Name', char(trajName + "_disturbance_boxplot"));
+        fig = figure('Color', 'w', 'Name', char(trajName + ""));
         [xLabel, yData, groupLabel, yLabelText] = boxchartData( ...
             results, mask, opts.boxDataSource);
 
@@ -78,12 +78,12 @@ function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
 
         if opts.savePlots
             pngPath = fullfile(opts.outputDir, ...
-                char(trajName + "_disturbance_boxplot.png"));
+                char(trajName + ".png"));
             figPath = fullfile(opts.outputDir, ...
-                char(trajName + "_disturbance_boxplot.fig"));
+                char(trajName + ".fig"));
             exportgraphics(fig, pngPath, 'Resolution', opts.resolution);
             savefig(fig, figPath);
-            figureFiles(end+1,1) = string(pngPath); %#ok<AGROW>
+            figureFiles(end+1,1) = string(pngPath); 
         end
     end
 end
@@ -199,9 +199,9 @@ function [xLabel, yData, groupLabel, yLabelText] = boxchartData( ...
                 err = err(isfinite(err));
                 n = numel(err);
 
-                xLabel = [xLabel; repmat(results.DisturbanceLevel(r), n, 1)]; %#ok<AGROW>
-                groupLabel = [groupLabel; repmat(results.Controller(r), n, 1)]; %#ok<AGROW>
-                yData = [yData; err(:)]; %#ok<AGROW>
+                xLabel = [xLabel; repmat(results.DisturbanceLevel(r), n, 1)]; 
+                groupLabel = [groupLabel; repmat(results.Controller(r), n, 1)]; 
+                yData = [yData; err(:)]; 
             end
 
             yLabelText = 'position tracking error samples (m)';

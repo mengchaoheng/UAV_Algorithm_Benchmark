@@ -23,11 +23,16 @@ end
 
 %% ========================================================================
 %% 0. What to Run
-
+% controller
+% "geometric", "lee", "johnson", "px4_iris"
+% "sun_dfbc", "sun_dfbc_indi"
+% "lu", "sun_nmpc", "sun_nmpc_indi"
+% "tal", "geometric_indi"
 controllerName = "geometric_indi";
 
-trajNames = ["figure8_horizontal", "figure8_vertical", ...
-    "helix_flip", "flip_loop_sine", "fast_circle"];
+% trajNames = ["figure8_horizontal", "figure8_vertical", ...
+%     "helix_flip", "flip_loop_sine", "fast_circle"];
+trajNames = ["figure8_horizontal", "helix_flip"];
 % trajNames = "all";
 % trajNames = ["helix_flip"];
 
@@ -35,6 +40,11 @@ trajNames = ["figure8_horizontal", "figure8_vertical", ...
 %% 1. Simulation and Output Settings
 
 integratorName = "lie_rk4";
+
+% Parallelizes independent trajectory simulations.
+% Leave numWorkers empty to let MATLAB choose the pool size.
+useParallel = true;
+numWorkers = [];
 
 makePlots = true;
 savePlots = true;
@@ -53,6 +63,8 @@ extraOverride.disturbance.enabled = false;
 cfg.controllerName = controllerName;
 cfg.trajNames = trajNames;
 cfg.integratorName = integratorName;
+cfg.useParallel = useParallel;
+cfg.numWorkers = numWorkers;
 cfg.makePlots = makePlots;
 cfg.savePlots = savePlots;
 cfg.plotStateDetail = plotStateDetail;
@@ -107,6 +119,8 @@ function results = runMainTrajectorySweep(cfg)
     IsFinite = false(nRuns,1);
     ErrorMessage = strings(nRuns,1);
 
+    overrides = cell(nRuns,1);
+
     for iRun = 1:nRuns
         trajName = string(trajNames(iRun));
         runDir = fullfile(controllerDir, ...
@@ -118,41 +132,67 @@ function results = runMainTrajectorySweep(cfg)
         MatFile(iRun) = string(fullfile(runDir, 'main_run.mat'));
         FigureDir(iRun) = string(fullfile(runDir, 'figures'));
 
+        if ~exist(runDir, 'dir')
+            mkdir(runDir);
+        end
+
+        override = cfg.extraOverride;
+        override.trajName = trajName;
+        override.controllerName = string(cfg.controllerName);
+        override.integratorName = string(cfg.integratorName);
+        override.enablePlots = logical(cfg.makePlots) && ~multiInstance;
+        override.saveResults = true;
+        override.saveMat = true;
+        override.saveFigures = logical(cfg.savePlots);
+        override.plotStateDetail = logical(cfg.plotStateDetail);
+        override.resultDir = runDir;
+        override.sun.acadosCodegenDir = fullfile(tempdir, ...
+            "uav_sun_acados_codegen_" + matlab.lang.makeValidName( ...
+            string(cfg.controllerName) + "_" + trajName));
+
+        overrides{iRun} = override;
+    end
+
+    metricsCell = cell(nRuns,1);
+    simOk = false(nRuns,1);
+    simMessage = strings(nRuns,1);
+    runInParallel = logical(cfg.useParallel) && multiInstance;
+
+    if runInParallel
+        pool = startMainTrajectorySweepPool(cfg);
+        fprintf('Running %d trajectory simulations in parallel with %d workers.\n', ...
+            nRuns, pool.NumWorkers);
+        parfor iRun = 1:nRuns
+            [metricsCell{iRun}, simOk(iRun), simMessage(iRun)] = ...
+                runMainTrajectorySimulation(repoDir, overrides{iRun});
+        end
+    else
+        fprintf('Running %d trajectory simulations serially.\n', nRuns);
+        for iRun = 1:nRuns
+            [metricsCell{iRun}, simOk(iRun), simMessage(iRun)] = ...
+                runMainTrajectorySimulation(repoDir, overrides{iRun});
+        end
+    end
+
+    for iRun = 1:nRuns
+        metrics = metricsCell{iRun};
+
         try
-            if ~exist(runDir, 'dir')
-                mkdir(runDir);
+            if ~simOk(iRun)
+                error('%s', char(simMessage(iRun)));
             end
 
-            override = cfg.extraOverride;
-            override.trajName = trajName;
-            override.controllerName = string(cfg.controllerName);
-            override.integratorName = string(cfg.integratorName);
-            override.enablePlots = logical(cfg.makePlots) && ~multiInstance;
-            override.saveResults = true;
-            override.saveMat = true;
-            override.saveFigures = logical(cfg.savePlots);
-            override.plotStateDetail = logical(cfg.plotStateDetail);
-            override.resultDir = runDir;
-
-            clear('main'); % reset script-local persistent states.
-            UAV_BENCHMARK_BATCH = true; %#ok<NASGU>
-            UAV_BENCHMARK_PAR_OVERRIDE = override; %#ok<NASGU>
-            run(fullfile(repoDir, 'main.m'));
-
-            err = vecnorm(log.p - log.pd, 2, 1);
-            RMSE(iRun) = sqrt(mean(err.^2, 'omitnan'));
-            MeanError(iRun) = mean(err, 'omitnan');
-            P95Error(iRun) = prctile(err, 95);
-            MaxError(iRun) = max(err);
-            FinalError(iRun) = err(end);
-            Tend(iRun) = time(end);
-            NumSamples(iRun) = numel(time);
-            IsFinite(iRun) = all(isfinite(err)) ...
-                && all(isfinite(log.T)) ...
-                && all(isfinite(log.tau(:)));
+            RMSE(iRun) = metrics.rmse;
+            MeanError(iRun) = metrics.meanError;
+            P95Error(iRun) = metrics.p95Error;
+            MaxError(iRun) = metrics.maxError;
+            FinalError(iRun) = metrics.finalError;
+            Tend(iRun) = metrics.tEnd;
+            NumSamples(iRun) = metrics.numSamples;
+            IsFinite(iRun) = metrics.isFinite;
 
             fprintf('[%2d/%2d] %-18s %-16s rmse=%.4g p95=%.4g max=%.4g\n', ...
-                iRun, nRuns, trajName, string(cfg.controllerName), ...
+                iRun, nRuns, Trajectory(iRun), string(cfg.controllerName), ...
                 RMSE(iRun), P95Error(iRun), MaxError(iRun));
 
             if ~cfg.keepFigureWindows && ~multiInstance
@@ -162,7 +202,7 @@ function results = runMainTrajectorySweep(cfg)
         catch ME
             ErrorMessage(iRun) = string(ME.message);
             fprintf('[%2d/%2d] FAILED %s %s: %s\n', ...
-                iRun, nRuns, trajName, string(cfg.controllerName), ...
+                iRun, nRuns, Trajectory(iRun), string(cfg.controllerName), ...
                 ErrorMessage(iRun));
         end
     end
@@ -193,6 +233,12 @@ function cfg = fillMainTrajectorySweepDefaults(cfg, repoDir)
     end
     if ~isfield(cfg, 'integratorName')
         cfg.integratorName = "lie_rk4";
+    end
+    if ~isfield(cfg, 'useParallel')
+        cfg.useParallel = false;
+    end
+    if ~isfield(cfg, 'numWorkers')
+        cfg.numWorkers = [];
     end
     if ~isfield(cfg, 'makePlots')
         cfg.makePlots = true;
@@ -234,6 +280,63 @@ function plotSweepFigures(results, cfg, controllerDir)
         'SavePlots', cfg.savePlots, ...
         'ClearOutput', true, ...
         'KeepFigureWindows', cfg.keepFigureWindows);
+end
+
+function pool = startMainTrajectorySweepPool(cfg)
+
+    pool = gcp('nocreate');
+    if ~isempty(pool)
+        return;
+    end
+
+    if isempty(cfg.numWorkers)
+        pool = parpool;
+    else
+        pool = parpool(cfg.numWorkers);
+    end
+end
+
+function [metrics, isOk, message] = runMainTrajectorySimulation( ...
+        repoDir, override)
+
+    metrics = emptyMainTrajectoryMetrics();
+    isOk = false;
+    message = "";
+
+    try
+        clear('main'); % reset script-local persistent states.
+        UAV_BENCHMARK_BATCH = true; %#ok<NASGU>
+        UAV_BENCHMARK_PAR_OVERRIDE = override; %#ok<NASGU>
+        run(fullfile(repoDir, 'main.m'));
+
+        err = vecnorm(log.p - log.pd, 2, 1);
+        metrics.rmse = sqrt(mean(err.^2, 'omitnan'));
+        metrics.meanError = mean(err, 'omitnan');
+        metrics.p95Error = prctile(err, 95);
+        metrics.maxError = max(err);
+        metrics.finalError = err(end);
+        metrics.tEnd = time(numel(time));
+        metrics.numSamples = numel(time);
+        metrics.isFinite = all(isfinite(err)) ...
+            && all(isfinite(log.T)) ...
+            && all(isfinite(log.tau(:)));
+        isOk = true;
+    catch ME
+        message = string(ME.message);
+    end
+end
+
+function metrics = emptyMainTrajectoryMetrics()
+
+    metrics = struct( ...
+        'rmse', nan, ...
+        'meanError', nan, ...
+        'p95Error', nan, ...
+        'maxError', nan, ...
+        'finalError', nan, ...
+        'tEnd', nan, ...
+        'numSamples', nan, ...
+        'isFinite', false);
 end
 
 function dst = mergeStructLocal(dst, src)
