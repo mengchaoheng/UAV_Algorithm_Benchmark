@@ -8,10 +8,12 @@ function results = run_disturbance_benchmark(cfg)
 %
 % The script calls main.m in batch mode with parameter overrides, so main.m
 % remains the single source of truth for dynamics, trajectories, and
-% controllers. Results are stored as MAT/CSV files. By default the boxcharts
-% use all selected tracking-error samples from each run. cfg.errorEvalMode can
-% exclude the final prediction horizon so terminal-reference policy does not
-% leak into a continuous-tracking benchmark.
+% controllers. Results are stored as MAT/CSV files. cfg.numRepeats controls
+% how many independent runs are made for each trajectory/controller/level.
+% By default the boxcharts use all selected tracking-error samples from each
+% run. Set cfg.boxDataSource="rmse" to draw boxcharts from one RMSE sample per
+% repeated run. cfg.errorEvalMode can exclude the final prediction horizon so
+% terminal-reference policy does not leak into a continuous-tracking benchmark.
 
     if nargin < 1
         cfg = struct();
@@ -31,13 +33,17 @@ function results = run_disturbance_benchmark(cfg)
     end
 
     levels = cfg.levels;
-    nTotal = numel(cfg.trajNames) * numel(cfg.controllerNames) ...
-           * numel(levels);
+    nTotal = 0;
+    for iCtrl = 1:numel(cfg.controllerNames)
+        nTotal = nTotal + numel(cfg.trajNames) * numel(levels) ...
+            * repeatCountForController(cfg, cfg.controllerNames(iCtrl));
+    end
 
     Trajectory = strings(nTotal,1);
     Controller = strings(nTotal,1);
     DisturbanceType = strings(nTotal,1);
     DisturbanceLevel = strings(nTotal,1);
+    Repeat = nan(nTotal,1);
     ForceAmpN = nan(nTotal,1);
     MomentAmpNm = nan(nTotal,1);
     ForceAmpX_N = nan(nTotal,1);
@@ -67,31 +73,35 @@ function results = run_disturbance_benchmark(cfg)
 
         for iCtrl = 1:numel(cfg.controllerNames)
             controllerName = string(cfg.controllerNames(iCtrl));
+            nRepeats = repeatCountForController(cfg, controllerName);
 
             for iLevel = 1:numel(levels)
                 level = levels(iLevel);
 
-                row = row + 1;
+                for iRepeat = 1:nRepeats
+                    row = row + 1;
 
-                Trajectory(row) = trajName;
-                Controller(row) = controllerName;
-                DisturbanceType(row) = string(cfg.disturbanceType);
-                DisturbanceLevel(row) = string(level.name);
-                forceAmp = vector3Local(level.forceAmp);
-                momentAmp = vector3Local(level.momentAmp);
+                    Trajectory(row) = trajName;
+                    Controller(row) = controllerName;
+                    DisturbanceType(row) = string(cfg.disturbanceType);
+                    DisturbanceLevel(row) = string(level.name);
+                    Repeat(row) = iRepeat;
+                    forceAmp = vector3Local(level.forceAmp);
+                    momentAmp = vector3Local(level.momentAmp);
 
-                ForceAmpN(row) = norm(forceAmp);
-                MomentAmpNm(row) = norm(momentAmp);
-                ForceAmpX_N(row) = forceAmp(1);
-                ForceAmpY_N(row) = forceAmp(2);
-                ForceAmpZ_N(row) = forceAmp(3);
-                MomentAmpX_Nm(row) = momentAmp(1);
-                MomentAmpY_Nm(row) = momentAmp(2);
-                MomentAmpZ_Nm(row) = momentAmp(3);
+                    ForceAmpN(row) = norm(forceAmp);
+                    MomentAmpNm(row) = norm(momentAmp);
+                    ForceAmpX_N(row) = forceAmp(1);
+                    ForceAmpY_N(row) = forceAmp(2);
+                    ForceAmpZ_N(row) = forceAmp(3);
+                    MomentAmpX_Nm(row) = momentAmp(1);
+                    MomentAmpY_Nm(row) = momentAmp(2);
+                    MomentAmpZ_Nm(row) = momentAmp(3);
 
-                override = makeDisturbanceOverride( ...
-                    trajName, controllerName, level, cfg);
-                overrides{row} = override;
+                    override = makeDisturbanceOverride( ...
+                        trajName, controllerName, level, iRepeat, cfg);
+                    overrides{row} = override;
+                end
             end
         end
     end
@@ -136,20 +146,21 @@ function results = run_disturbance_benchmark(cfg)
             ErrorTrace{iRun} = err(1:cfg.errorSampleStride:end).';
             IsFinite(iRun) = all(isfinite(err));
 
-            fprintf('[%3d/%3d] %-18s %-16s %-6s rmse=%.4g p95=%.4g max=%.4g\n', ...
+            fprintf(['[%3d/%3d] %-18s %-16s %-6s r=%02d ' ...
+                'rmse=%.4g p95=%.4g max=%.4g\n'], ...
                 iRun, nTotal, Trajectory(iRun), Controller(iRun), ...
-                DisturbanceLevel(iRun), RMSE(iRun), P95Error(iRun), ...
-                MaxError(iRun));
+                DisturbanceLevel(iRun), Repeat(iRun), RMSE(iRun), ...
+                P95Error(iRun), MaxError(iRun));
         else
             ErrorMessage(iRun) = simMessage(iRun);
-            fprintf('[%3d/%3d] FAILED %s %s %s: %s\n', ...
+            fprintf('[%3d/%3d] FAILED %s %s %s r=%02d: %s\n', ...
                 iRun, nTotal, Trajectory(iRun), Controller(iRun), ...
-                DisturbanceLevel(iRun), simMessage(iRun));
+                DisturbanceLevel(iRun), Repeat(iRun), simMessage(iRun));
         end
     end
 
     results = table(Trajectory, Controller, DisturbanceType, ...
-        DisturbanceLevel, ForceAmpN, MomentAmpNm, ...
+        DisturbanceLevel, Repeat, ForceAmpN, MomentAmpNm, ...
         ForceAmpX_N, ForceAmpY_N, ForceAmpZ_N, ...
         MomentAmpX_Nm, MomentAmpY_Nm, MomentAmpZ_Nm, ...
         RMSE, MeanError, P95Error, MaxError, FinalError, ...
@@ -159,7 +170,7 @@ function results = run_disturbance_benchmark(cfg)
     figureFiles = strings(0,1);
 
     if cfg.makePlots
-        figureFiles = plot_disturbance_benchmark( ...
+        figureFiles = render_disturbance_benchmark( ...
             results, cfg, 'OutputDir', figDir);
     end
 
@@ -184,7 +195,8 @@ end
 function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
 
     if ~isfield(cfg, 'trajNames')
-        cfg.trajNames = ["fast_circle", "figure8_horizontal", "helix_flip"];
+        cfg.trajNames = ["fast_circle", "figure8_horizontal", ...
+            "helix_flip", "race_track_c"];
     end
     if ~isfield(cfg, 'controllerNames')
         cfg.controllerNames = ["geometric", "lee", "johnson", ...
@@ -195,18 +207,26 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     if ~isfield(cfg, 'levels')
         cfg.levels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {[0.05; 0.05; 0.03], ...
-                         [0.10; 0.10; 0.06], ...
-                         [0.20; 0.20; 0.10]}, ...
-            'momentAmp',{[0.005; 0.005; 0.0005], ...
-                         [0.010; 0.010; 0.0010], ...
-                         [0.020; 0.020; 0.0020]});
+            'forceAmp', {[0.15; 0.15; 0.08], ...
+                         [0.30; 0.30; 0.15], ...
+                         [0.45; 0.45; 0.22]}, ...
+            'momentAmp',{[0.025; 0.025; 0.0025], ...
+                         [0.050; 0.050; 0.0050], ...
+                         [0.080; 0.080; 0.0080]});
     end
     if ~isfield(cfg, 'disturbanceType')
-        cfg.disturbanceType = "sin";
+        cfg.disturbanceType = "random";
     end
     if ~isfield(cfg, 'boxDataSource')
         cfg.boxDataSource = "time_error"; % "time_error" or "rmse"
+    end
+    if ~isfield(cfg, 'numRepeats')
+        cfg.numRepeats = 1;
+    else
+        cfg.numRepeats = max(1, round(double(cfg.numRepeats)));
+    end
+    if ~isfield(cfg, 'controllerRepeats')
+        cfg.controllerRepeats = struct();
     end
     if ~isfield(cfg, 'errorSampleStride')
         cfg.errorSampleStride = 1; % Use every simulated time step in boxcharts.
@@ -237,6 +257,18 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     if ~isfield(cfg, 'momentPhase')
         cfg.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
     end
+    if ~isfield(cfg, 'forceTau')
+        cfg.forceTau = [1.5; 1.5; 1.0];
+    end
+    if ~isfield(cfg, 'momentTau')
+        cfg.momentTau = [0.35; 0.35; 0.25];
+    end
+    if ~isfield(cfg, 'disturbanceSeedBase')
+        cfg.disturbanceSeedBase = 24001;
+    end
+    if ~isfield(cfg, 'feedbackNoiseSeedBase')
+        cfg.feedbackNoiseSeedBase = 43001;
+    end
     if ~isfield(cfg, 'disturbanceStartTime')
         cfg.disturbanceStartTime = 0;
     end
@@ -266,7 +298,28 @@ function cfg = fillDisturbanceBenchmarkDefaults(cfg, repoDir)
     end
 end
 
-function override = makeDisturbanceOverride(trajName, controllerName, level, cfg)
+function nRepeats = repeatCountForController(cfg, controllerName)
+
+    nRepeats = cfg.numRepeats;
+    repeatOverrides = cfg.controllerRepeats;
+
+    if isstruct(repeatOverrides)
+        field = matlab.lang.makeValidName(char(controllerName));
+        if isfield(repeatOverrides, field)
+            nRepeats = repeatOverrides.(field);
+        end
+    elseif isa(repeatOverrides, 'containers.Map')
+        key = char(controllerName);
+        if isKey(repeatOverrides, key)
+            nRepeats = repeatOverrides(key);
+        end
+    end
+
+    nRepeats = max(1, round(double(nRepeats)));
+end
+
+function override = makeDisturbanceOverride( ...
+        trajName, controllerName, level, repeatIndex, cfg)
 
     override.trajName = trajName;
     override.controllerName = controllerName;
@@ -276,7 +329,8 @@ function override = makeDisturbanceOverride(trajName, controllerName, level, cfg
     override.saveResults = false;
     override.sun.acadosCodegenDir = fullfile(tempdir, ...
         "uav_sun_acados_codegen_" + matlab.lang.makeValidName( ...
-        trajName + "_" + controllerName + "_" + string(level.name)));
+        trajName + "_" + controllerName + "_" + string(level.name) ...
+        + "_r" + string(repeatIndex)));
 
     if ~isempty(fieldnames(cfg.progress))
         override.progress = cfg.progress;
@@ -292,6 +346,13 @@ function override = makeDisturbanceOverride(trajName, controllerName, level, cfg
     override.disturbance.momentFreq = cfg.momentFreq;
     override.disturbance.forcePhase = cfg.forcePhase;
     override.disturbance.momentPhase = cfg.momentPhase;
+    override.disturbance.forceTau = cfg.forceTau;
+    override.disturbance.momentTau = cfg.momentTau;
+    override.disturbance.seed = stableSeed(cfg.disturbanceSeedBase, ...
+        trajName, string(level.name), "repeat", repeatIndex);
+
+    override.feedbackNoise.seed = stableSeed(cfg.feedbackNoiseSeedBase, ...
+        trajName, string(level.name), "repeat", repeatIndex);
 end
 
 function v = vector3Local(x)
@@ -301,6 +362,18 @@ function v = vector3Local(x)
     if numel(v) ~= 3
         error("Disturbance direction must be a 3x1 vector.");
     end
+end
+
+function seed = stableSeed(baseSeed, varargin)
+
+    seed = double(baseSeed);
+    for i = 1:nargin-1
+        text = char(string(varargin{i}));
+        for j = 1:numel(text)
+            seed = mod(seed*33 + double(text(j)), 2^31 - 1);
+        end
+    end
+    seed = mod(round(seed), 2^31 - 1);
 end
 
 function pool = startBenchmarkPool(cfg)

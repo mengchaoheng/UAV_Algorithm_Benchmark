@@ -1,13 +1,15 @@
-function figureFiles = plot_main_sweep(varargin)
-%PLOT_MAIN_SWEEP Replot detailed trajectory-sweep results.
+function figureFiles = render_main_trajectory_sweep(varargin)
+%RENDER_MAIN_TRAJECTORY_SWEEP Render detailed trajectory-sweep figures.
 %
 % Usage:
-%   plot_main_sweep("results/main_trajectory_sweep/geometric_indi")
-%   plot_main_sweep(".../main_trajectory_sweep_results.mat")
-%   plot_main_sweep(results, cfg)
+%   render_main_trajectory_sweep
+%   render_main_trajectory_sweep("results/main_trajectory_sweep/geometric_indi")
+%   render_main_trajectory_sweep(".../main_trajectory_sweep_results.mat")
+%   render_main_trajectory_sweep(results, cfg)
 
     [results, cfg, args] = parseSweepInputs(varargin);
     opts = sweepPlotOptions(results, cfg, args);
+    results = filterSweepResults(results, opts);
 
     data = loadSweepRunData(results);
     figureFiles = strings(0,1);
@@ -60,7 +62,7 @@ function [results, cfg, args] = parseSweepInputs(argsIn)
             cfg = argsIn{2};
             args = argsIn(3:end);
         else
-            cfg = getfield(results.Properties.UserData, 'cfg'); %#ok<GFLD>
+            cfg = results.Properties.UserData.cfg;
             args = argsIn(2:end);
         end
         return;
@@ -84,7 +86,8 @@ function [results, cfg, args] = parseSweepInputs(argsIn)
         return;
     end
 
-    error('plot_main_sweep requires a sweep result folder/file or results table.');
+    error(['render_main_trajectory_sweep requires a sweep result ', ...
+        'folder/file or results table.']);
 end
 
 function dataPath = defaultSweepResultsPath()
@@ -102,7 +105,8 @@ end
 function tf = isSweepOptionName(name)
 
     names = ["saveplots", "outputdir", "resolution", "clearoutput", ...
-        "keepfigurewindows", "animationspeed", "animationframedt"];
+        "keepfigurewindows", "animationspeed", "animationframedt", ...
+        "trajnames", "trajectorynames"];
     tf = ismember(lower(string(name)), names);
 end
 
@@ -115,6 +119,7 @@ function opts = sweepPlotOptions(results, cfg, args)
     opts.keepFigureWindows = true;
     opts.animationSpeed = [];
     opts.animationFrameDt = [];
+    opts.trajNames = unique(results.Trajectory, 'stable');
 
     i = 1;
     while i <= numel(args)
@@ -136,12 +141,32 @@ function opts = sweepPlotOptions(results, cfg, args)
                 opts.animationSpeed = double(value);
             case "animationframedt"
                 opts.animationFrameDt = double(value);
+            case {"trajnames", "trajectorynames"}
+                opts.trajNames = selectedSweepNames(value, ...
+                    unique(results.Trajectory, 'stable'));
             otherwise
-                error('Unknown plot_main_sweep option: %s.', name);
+                error('Unknown render_main_trajectory_sweep option: %s.', ...
+                    name);
         end
 
         i = i + 2;
     end
+end
+
+function results = filterSweepResults(results, opts)
+
+    mask = ismember(results.Trajectory, opts.trajNames);
+    results = results(mask,:);
+end
+
+function names = selectedSweepNames(value, defaultNames)
+
+    names = string(value);
+    names = names(strlength(names) > 0);
+    if isempty(names)
+        names = string(defaultNames);
+    end
+    names = names(:);
 end
 
 function outputDir = defaultSweepFigureDir(results, cfg)
@@ -159,15 +184,20 @@ end
 
 function data = loadSweepRunData(results)
 
-    data = struct('time', {}, 'log', {}, 'par', {}, 'traj', {}, 'label', {});
+    data = repmat( ...
+        struct('time', [], 'log', [], 'par', [], 'traj', [], 'label', ""), ...
+        height(results), 1);
+    nData = 0;
     for i = 1:height(results)
         matFile = char(results.MatFile(i));
         if strlength(results.ErrorMessage(i)) == 0 && isfile(matFile)
             S = load(matFile, 'time', 'log', 'par', 'traj');
             S.label = shortTrajectoryLabel(results.Trajectory(i));
-            data(end+1) = S; 
+            nData = nData + 1;
+            data(nData) = S;
         end
     end
+    data = data(1:nData);
 end
 
 function fig = plotSweepTrajectory3D(data)

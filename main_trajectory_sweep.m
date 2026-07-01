@@ -28,11 +28,11 @@ end
 % "sun_dfbc", "sun_dfbc_indi"
 % "lu", "sun_nmpc", "sun_nmpc_indi"
 % "tal", "geometric_indi"
-controllerName = "geometric_indi";
+controllerName = "sun_dfbc";
 
-% trajNames = ["figure8_horizontal", "figure8_vertical", ...
-%     "helix_flip", "flip_loop_sine", "fast_circle"];
-trajNames = ["figure8_horizontal", "helix_flip"];
+trajNames = ["figure8_horizontal", "figure8_vertical", ...
+    "helix_flip", "flip_loop_sine", "fast_circle"];
+% trajNames = ["figure8_horizontal"];
 % trajNames = "all";
 % trajNames = ["helix_flip"];
 
@@ -47,15 +47,16 @@ useParallel = true;
 numWorkers = [];
 
 makePlots = true;
-savePlots = true;
+savePlots = false;
 plotStateDetail = true;       % single-trajectory only.
 keepFigureWindows = true;
 
 outputRoot = fullfile(pwd, "results", "main_trajectory_sweep");
 
-% Optional extra parameter overrides passed to main.m every run.
+% Optional extra parameter overrides passed to main.m every run. The sweep
+% defaults to no plant disturbance; comment the next line to inherit main.m.
 extraOverride = struct();
-extraOverride.disturbance.enabled = false;
+extraOverride.disturbance.enabled = true; % no-disturbance clean sweep.
 
 %% ========================================================================
 %% 2. Build Config and Run
@@ -265,7 +266,7 @@ function trajNames = expandTrajectoryNames(trajNames)
     trajNames = string(trajNames);
     if isscalar(trajNames) && trajNames == "all"
         trajNames = ["figure8_horizontal", "figure8_vertical", ...
-            "helix_flip", "flip_loop_sine", "fast_circle"];
+            "helix_flip", "flip_loop_sine", "fast_circle", "race_track_c"];
     end
 end
 
@@ -275,7 +276,7 @@ function plotSweepFigures(results, cfg, controllerDir)
         return;
     end
 
-    plot_main_sweep(results, cfg, ...
+    render_main_trajectory_sweep(results, cfg, ...
         'OutputDir', fullfile(controllerDir, 'figures'), ...
         'SavePlots', cfg.savePlots, ...
         'ClearOutput', true, ...

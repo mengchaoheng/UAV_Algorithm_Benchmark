@@ -15,9 +15,10 @@ clear; clc; close all;
 %   "helix_flip"
 %   "flip_loop_sine"
 %   "fast_circle"
-% trajNames = ["figure8_horizontal", "figure8_vertical", ...
-%     "helix_flip", "flip_loop_sine", "fast_circle"];
-trajNames = ["figure8_horizontal", "helix_flip"];
+%   "race_track_c"
+trajNames = ["figure8_horizontal", "figure8_vertical", ...
+    "helix_flip", "flip_loop_sine", "fast_circle"];
+% trajNames = ["figure8_horizontal", "helix_flip"];
 % trajNames = ["helix_flip"];
 
 % Available controllers for this comparison:
@@ -25,16 +26,21 @@ trajNames = ["figure8_horizontal", "helix_flip"];
 % "sun_dfbc", "sun_dfbc_indi" 
 % "sun_nmpc", "sun_nmpc_indi"
 % "lu", "tal", "geometric_indi"
-controllerNames = ["johnson", ...
+controllerNames = ["geometric", "lee", "johnson",...
     "sun_dfbc", "sun_dfbc_indi", ...
-    "sun_nmpc", "sun_nmpc_indi", ...
+    "sun_nmpc", "sun_nmpc_indi",...
     "lu", "tal", "geometric_indi"];
 
 % Optional focused subsets:
 % controllerNames = ["tal", "geometric_indi"];
 % controllerNames = ["sun_dfbc", "sun_dfbc_indi", "sun_nmpc", "sun_nmpc_indi"];
-% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "tal", "geometric_indi"];
-% controllerNames = ["sun_nmpc", "sun_nmpc_indi", "lu", "tal", "geometric_indi"];
+% controllerNames = ["sun_dfbc_indi", "sun_nmpc_indi", "tal", ...
+%     "geometric_indi"];
+% controllerNames = ["sun_nmpc", "sun_nmpc_indi", "lu", "tal", ...
+%     "geometric_indi"];
+
+% controllerNames = ["sun_nmpc", "sun_nmpc_indi", "lu", "tal", ...
+%     "geometric_indi"];
 
 
 
@@ -42,13 +48,37 @@ controllerNames = ["johnson", ...
 %% 1. Disturbance Settings
 
 % Available presets:
+%   "random_gust"   : colored random force/moment loads, UAV gust-style.
 %   "combined_sine" : force and moment together, zero-mean engineering test.
 %   "legacy_bias"  : old zero-frequency sine bias, force and moment together.
 %   "paper_force"  : Sun et al. force-only robustness case, 5 seconds.
 %   "paper_moment" : Sun et al. moment-only robustness case, 5 seconds.
-disturbanceCase = "combined_sine";
+disturbanceCase = "random_gust";
 
 switch disturbanceCase
+    case "random_gust"
+        % First-order Gauss-Markov random force/moment loads. This is a
+        % lightweight Dryden-style gust approximation: white noise is filtered
+        % into correlated zero-mean external loads.
+        disturbanceType = "random";
+        disturbanceStartTime = 0.0;
+        disturbanceEndTime = inf;
+        forceFreq = [0.17; 0.23; 0.31];
+        momentFreq = [0.19; 0.29; 0.37];
+        forcePhase = [0; 1*pi/3; 2*pi/3];
+        momentPhase = [pi/4; 3*pi/4; 5*pi/4];
+        forceTau = [1.5; 1.5; 1.0];
+        momentTau = [0.35; 0.35; 0.25];
+        disturbanceSeedBase = 24001;
+        disturbanceLevels = struct( ...
+            'name',     {'low', 'medium', 'high'}, ...
+            'forceAmp', {[0.15; 0.15; 0.08], ...
+                         [0.30; 0.30; 0.15], ...
+                         [0.45; 0.45; 0.22]}, ...
+            'momentAmp',{[0.025; 0.025; 0.0025], ...
+                         [0.050; 0.050; 0.0050], ...
+                         [0.080; 0.080; 0.0080]});
+
     case "combined_sine"
         % Zero-mean per-axis force/moment disturbances for general robustness
         % sweeps. Yaw moment is intentionally much smaller: Iris yaw authority
@@ -60,14 +90,17 @@ switch disturbanceCase
         momentFreq = [0.19; 0.29; 0.37];
         forcePhase = [0; 1*pi/3; 2*pi/3];
         momentPhase = [pi/4; 3*pi/4; 5*pi/4];
+        forceTau = [1.5; 1.5; 1.0];
+        momentTau = [0.35; 0.35; 0.25];
+        disturbanceSeedBase = 24001;
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
-            'forceAmp', {[0.05; 0.05; 0.03], ...
-                         [0.10; 0.10; 0.06], ...
-                         [0.20; 0.20; 0.10]}, ...
-            'momentAmp',{[0.005; 0.005; 0.0005], ...
-                         [0.010; 0.010; 0.0010], ...
-                         [0.020; 0.020; 0.0020]});
+            'forceAmp', {[0.15; 0.15; 0.08], ...
+                         [0.30; 0.30; 0.15], ...
+                         [0.45; 0.45; 0.22]}, ...
+            'momentAmp',{[0.025; 0.025; 0.0025], ...
+                         [0.050; 0.050; 0.0050], ...
+                         [0.080; 0.080; 0.0080]});
 
     case "legacy_bias"
         % The older benchmark style: zero frequency and pi/2 phase make the
@@ -79,6 +112,9 @@ switch disturbanceCase
         momentFreq = [0; 0; 0];
         forcePhase = [pi/2; pi/2; pi/2];
         momentPhase = [pi/2; pi/2; pi/2];
+        forceTau = [1.5; 1.5; 1.0];
+        momentTau = [0.35; 0.35; 0.25];
+        disturbanceSeedBase = 24001;
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
             'forceAmp', {[0; 0; 0], ...
@@ -97,6 +133,9 @@ switch disturbanceCase
         momentFreq = [0; 0; 0];
         forcePhase = [0; 0; 0];
         momentPhase = [0; 0; 0];
+        forceTau = [1.5; 1.5; 1.0];
+        momentTau = [0.35; 0.35; 0.25];
+        disturbanceSeedBase = 24001;
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
             'forceAmp', {[5; 0; 0], ...
@@ -115,6 +154,9 @@ switch disturbanceCase
         momentFreq = [0; 0; 0];
         forcePhase = [0; 0; 0];
         momentPhase = [0; 0; 0];
+        forceTau = [1.5; 1.5; 1.0];
+        momentTau = [0.35; 0.35; 0.25];
+        disturbanceSeedBase = 24001;
         disturbanceLevels = struct( ...
             'name',     {'low', 'medium', 'high'}, ...
             'forceAmp', {[0; 0; 0], ...
@@ -170,6 +212,9 @@ cfg.forceFreq = forceFreq;
 cfg.momentFreq = momentFreq;
 cfg.forcePhase = forcePhase;
 cfg.momentPhase = momentPhase;
+cfg.forceTau = forceTau;
+cfg.momentTau = momentTau;
+cfg.disturbanceSeedBase = disturbanceSeedBase;
 
 cfg.makePlots = makePlots;
 cfg.savePlots = savePlots;

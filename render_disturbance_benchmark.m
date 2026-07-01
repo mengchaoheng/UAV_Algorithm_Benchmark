@@ -1,10 +1,11 @@
-function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
-%PLOT_DISTURBANCE_BENCHMARK Plot or replot disturbance benchmark results.
+function figureFiles = render_disturbance_benchmark( ...
+        resultsInput, cfg, varargin)
+%RENDER_DISTURBANCE_BENCHMARK Render disturbance benchmark figures.
 %
 % Usage:
-%   plot_disturbance_benchmark
-%   plot_disturbance_benchmark("results/disturbance_benchmark")
-%   plot_disturbance_benchmark(results, cfg)
+%   render_disturbance_benchmark
+%   render_disturbance_benchmark("results/disturbance_benchmark")
+%   render_disturbance_benchmark(results, cfg)
 
     if nargin < 1 || isempty(resultsInput)
         resultsInput = fullfile(pwd, "results", "disturbance_benchmark", ...
@@ -52,10 +53,14 @@ function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
         prepareFigureDir(opts.outputDir);
     end
 
-    figureFiles = strings(0,1);
+    figureFiles = strings(numel(opts.trajectoryOrder),1);
+    nFigureFiles = 0;
     for iTraj = 1:numel(opts.trajectoryOrder)
         trajName = string(opts.trajectoryOrder(iTraj));
-        mask = results.Trajectory == trajName & results.IsFinite;
+        mask = results.Trajectory == trajName ...
+            & ismember(results.Controller, opts.controllerNames) ...
+            & ismember(results.DisturbanceLevel, opts.levelNames) ...
+            & results.IsFinite;
         if ~any(mask)
             continue;
         end
@@ -72,9 +77,11 @@ function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
         grid on;
         xlabel('disturbance amplitude');
         ylabel(yLabelText);
+        formatErrorAxis(gca);
         title("Trajectory: " + trajName, 'Interpreter', 'none');
         legend('Location', 'northwest', 'Interpreter', 'none');
-        subtitle(amplitudeSummaryText(cfg.levels), 'Interpreter', 'none');
+        subtitle(amplitudeSummaryText(selectedLevels(cfg.levels, ...
+            opts.levelNames)), 'Interpreter', 'none');
 
         if opts.savePlots
             pngPath = fullfile(opts.outputDir, ...
@@ -83,9 +90,17 @@ function figureFiles = plot_disturbance_benchmark(resultsInput, cfg, varargin)
                 char(trajName + ".fig"));
             exportgraphics(fig, pngPath, 'Resolution', opts.resolution);
             savefig(fig, figPath);
-            figureFiles(end+1,1) = string(pngPath); 
+            nFigureFiles = nFigureFiles + 1;
+            figureFiles(nFigureFiles,1) = string(pngPath);
         end
     end
+    figureFiles = figureFiles(1:nFigureFiles);
+end
+
+function formatErrorAxis(ax)
+
+    ax.YAxis.Exponent = 0;
+    ytickformat(ax, '%.4g');
 end
 
 function opts = plotDisturbanceOptions(results, cfg, matPath, args)
@@ -99,6 +114,9 @@ function opts = plotDisturbanceOptions(results, cfg, matPath, args)
     opts.controllerOrder = string(getCfgField(cfg, 'controllerNames', ...
         unique(results.Controller, 'stable')));
     opts.levelOrder = string({cfg.levels.name});
+    opts.trajectoryNames = opts.trajectoryOrder;
+    opts.controllerNames = opts.controllerOrder;
+    opts.levelNames = opts.levelOrder;
 
     i = 1;
     while i <= numel(args)
@@ -114,23 +132,55 @@ function opts = plotDisturbanceOptions(results, cfg, matPath, args)
                 opts.resolution = double(value);
             case "boxdatasource"
                 opts.boxDataSource = string(value);
+            case {"trajnames", "trajectorynames"}
+                opts.trajectoryNames = selectedNames(value, ...
+                    unique(results.Trajectory, 'stable'));
+                opts.trajectoryOrder = opts.trajectoryNames;
+            case "controllernames"
+                opts.controllerNames = selectedNames(value, ...
+                    unique(results.Controller, 'stable'));
+                opts.controllerOrder = opts.controllerNames;
+            case {"levelnames", "disturbancelevels"}
+                opts.levelNames = selectedNames(value, ...
+                    unique(results.DisturbanceLevel, 'stable'));
+                opts.levelOrder = opts.levelNames;
             case "trajectoryorder"
                 opts.trajectoryOrder = string(value);
+                opts.trajectoryNames = opts.trajectoryOrder;
             case "controllerorder"
                 opts.controllerOrder = string(value);
             case "levelorder"
                 opts.levelOrder = string(value);
             otherwise
-                error("Unknown plot_disturbance_benchmark option: %s.", name);
+                error("Unknown render_disturbance_benchmark option: %s.", ...
+                    name);
         end
 
         i = i + 2;
     end
 
     opts.controllerOrder = appendMissing(opts.controllerOrder, ...
-        unique(results.Controller, 'stable'));
+        unique(results.Controller(ismember(results.Controller, ...
+        opts.controllerNames)), 'stable'));
     opts.levelOrder = appendMissing(opts.levelOrder, ...
-        unique(results.DisturbanceLevel, 'stable'));
+        unique(results.DisturbanceLevel(ismember(results.DisturbanceLevel, ...
+        opts.levelNames)), 'stable'));
+end
+
+function names = selectedNames(value, defaultNames)
+
+    names = string(value);
+    names = names(strlength(names) > 0);
+    if isempty(names)
+        names = string(defaultNames);
+    end
+    names = names(:).';
+end
+
+function levels = selectedLevels(levels, levelNames)
+
+    mask = ismember(string({levels.name}), string(levelNames));
+    levels = levels(mask);
 end
 
 function value = getCfgField(cfg, name, defaultValue)
@@ -190,18 +240,35 @@ function [xLabel, yData, groupLabel, yLabelText] = boxchartData( ...
     switch string(source)
         case "time_error"
             rowIdx = find(mask).';
-            xLabel = strings(0,1);
-            groupLabel = strings(0,1);
-            yData = zeros(0,1);
+            nRows = numel(rowIdx);
+            nSamples = zeros(nRows,1);
+            cleanErr = cell(nRows,1);
 
-            for r = rowIdx
-                err = results.ErrorTrace{r};
+            for i = 1:nRows
+                err = results.ErrorTrace{rowIdx(i)};
                 err = err(isfinite(err));
-                n = numel(err);
+                cleanErr{i} = err(:);
+                nSamples(i) = numel(err);
+            end
 
-                xLabel = [xLabel; repmat(results.DisturbanceLevel(r), n, 1)]; 
-                groupLabel = [groupLabel; repmat(results.Controller(r), n, 1)]; 
-                yData = [yData; err(:)]; 
+            nTotal = sum(nSamples);
+            xLabel = strings(nTotal,1);
+            groupLabel = strings(nTotal,1);
+            yData = zeros(nTotal,1);
+
+            idx = 0;
+            for i = 1:nRows
+                r = rowIdx(i);
+                n = nSamples(i);
+                if n == 0
+                    continue;
+                end
+
+                rows = idx + (1:n);
+                xLabel(rows) = repmat(results.DisturbanceLevel(r), n, 1);
+                groupLabel(rows) = repmat(results.Controller(r), n, 1);
+                yData(rows) = cleanErr{i};
+                idx = idx + n;
             end
 
             yLabelText = 'position tracking error samples (m)';

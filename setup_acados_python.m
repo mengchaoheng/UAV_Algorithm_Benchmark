@@ -3,9 +3,8 @@ function setup_acados_python()
 %
 % New-machine default:
 %   1. Use ACADOS_PYTHON when it is set.
-%   2. Otherwise use legacy SUN_NMPC_PYTHON when it is set.
-%   3. Otherwise create/use .venv under this repository.
-%   4. Install casadi and acados_template into that Python.
+%   2. Otherwise create/use .venv under this repository.
+%   3. Install casadi and acados_template into that Python.
 %
 % If MATLAB already loaded a different Python in this session, the setup still
 % prepares .venv, but MATLAB must be restarted before py.* can use it.
@@ -23,14 +22,8 @@ end
 
 pythonExe = string(getenv("ACADOS_PYTHON"));
 if strlength(pythonExe) == 0
-    pythonExe = string(getenv("SUN_NMPC_PYTHON"));
-end
-if strlength(pythonExe) == 0
     if exist(projectPython, "file") ~= 2
         bootstrapPython = string(getenv("ACADOS_BOOTSTRAP_PYTHON"));
-        if strlength(bootstrapPython) == 0
-            bootstrapPython = string(getenv("SUN_NMPC_BOOTSTRAP_PYTHON"));
-        end
         if strlength(bootstrapPython) == 0
             bootstrapPython = "python3";
         end
@@ -69,7 +62,6 @@ if exist(acadosTemplateDir, "dir") ~= 7
 end
 
 setenv("ACADOS_PYTHON", char(pythonExe));
-setenv("SUN_NMPC_PYTHON", char(pythonExe));
 setenv("ACADOS_SOURCE_DIR", char(acadosDir));
 setenv("ACADOS_INSTALL_DIR", char(acadosDir));
 setenv("MPLCONFIGDIR", char(fullfile(tempdir, "matplotlib")));

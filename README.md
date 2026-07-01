@@ -24,6 +24,44 @@ Run the disturbance benchmark:
 main_disturbance_benchmark
 ```
 
+Run the repeated disturbance Monte Carlo benchmark, where each repeated
+trajectory run contributes one RMSE sample to the final boxcharts:
+
+```matlab
+main_disturbance_monte_carlo
+```
+
+Replot Saved Results
+--------------------
+
+Saved results can be plotted again without rerunning simulations. Each
+simulation entry has a matching plot entry:
+
+| Run simulation | Replot saved result |
+| --- | --- |
+| `main` | `plot_main` |
+| `main_trajectory_sweep` | `plot_main_trajectory_sweep` |
+| `main_disturbance_benchmark` | `plot_main_disturbance_benchmark` |
+| `main_disturbance_monte_carlo` | `plot_main_disturbance_monte_carlo` |
+
+Run the `plot_*` file directly to redraw saved figures. For example,
+`plot_main_disturbance_monte_carlo` redraws the RMSE boxcharts from the last
+saved Monte Carlo result and does not run any simulations. Its editable
+settings are at the top of the file.
+
+The fixed result locations are:
+
+```text
+results/main/main_run.mat
+results/main_trajectory_sweep/<controller>/main_trajectory_sweep_results.mat
+results/main_trajectory_sweep/<controller>/<trajectory>/main_run.mat
+results/disturbance_benchmark/disturbance_benchmark_results.mat
+results/disturbance_monte_carlo/<case>/disturbance_benchmark_results.mat
+```
+
+The benchmark scripts also call their matching plotting code automatically
+when plotting is enabled.
+
 `main.m` currently defaults to:
 
 ```matlab
@@ -38,6 +76,37 @@ par.controllerName = "sun_nmpc";
 
 `main_trajectory_sweep.m` is configured to sweep `sun_nmpc` by default.
 The Sun NMPC path is acados-backed; it is not a pure MATLAB implementation.
+
+Noise And Disturbances
+----------------------
+
+`main.m` injects measurement noise into the state fed back to the controller:
+
+```matlab
+par.feedbackNoise.enabled = true;
+```
+
+The plant still integrates the true state `x`; controllers receive `xMeas`.
+Both are logged, for example `log.p` and `log.pMeas`. Position, velocity,
+attitude, and body-rate white-noise standard deviations are configured under
+`par.feedbackNoise`.
+
+INDI controllers should not finite-difference noisy velocity/rate feedback
+directly. Tal, Sun `*_indi`, and `geometric_indi` inner-loop INDI filters all
+use `par.indi.innerLoopFilterCutoffHz`. Tal and `geometric_indi` outer-loop
+INDI filters use `par.indi.outerLoopFilterCutoffHz`.
+
+The default plant disturbance is stochastic:
+
+```matlab
+par.disturbance.type = "random";
+```
+
+This uses a first-order Gauss-Markov colored-noise model for external force
+and moment disturbances. It is a lightweight Dryden-style UAV gust/load model:
+white noise is filtered by a correlation time, then scaled by the configured
+RMS force and moment levels. Deterministic `"constant"` and `"sin"` disturbance
+types are still available for paper comparisons and debugging.
 
 Sun NMPC Dependency Setup
 -------------------------
@@ -91,9 +160,8 @@ Silicon it uses `BLASFEO_TARGET=ARMV8A_APPLE_M1` and
 The runtime code looks for Python in this order:
 
 1. `ACADOS_PYTHON`, when explicitly set.
-2. Legacy `SUN_NMPC_PYTHON`, when explicitly set.
-3. `.venv/bin/python3` under this repository.
-4. MATLAB's current/default Python, only if no project Python exists.
+2. `.venv/bin/python3` under this repository.
+3. MATLAB's current/default Python, only if no project Python exists.
 
 Manual install, if you do not want to use `install_acados`:
 

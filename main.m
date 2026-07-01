@@ -55,16 +55,31 @@ par.axis = [0; 0; -1];
 par.spin = [1; 1; -1; -1];
 
 par.dt = 1/500;         % Base simulation/hold tick; 100 Hz and 250 Hz divide exactly.
-par.Tend = 16.0;
+par.Tend = 30.0;
 par.integratorName = "ode45";  % "ode45" or "lie_rk4"
 par.control.outerPeriod = 0.01;  % 100 Hz MPC solve refresh.
 par.control.innerPeriod = 1/250; % 250 Hz non-MPC/INDI/direct-control refresh.
+% Shared INDI feedback LPFs. All INDI inner loops use the same cutoff; Tal
+% and geometric_indi also share one outer-loop INDI cutoff.
+par.indi.innerLoopFilterCutoffHz = 30;
+par.indi.outerLoopFilterCutoffHz = 30;
 
-% Reference time scaling.
-% scale > 1 slows the reference; scale < 1 speeds it up and may saturate control.
-par.progress.mode = "scale_range";      % "scale_fixed" or "scale_range"
-par.progress.scale = 1;               % scale_fixed: constant time scale
-par.progress.scaleRange = [1, 0.3];   % scale_range: start/end scale over the simulation
+% Reference progress scaling.
+% Every benchmark trajectory is defined first as a geometric/base curve
+%   r0(s), psi0(s), 0 <= s <= T0,
+% then time-reparameterized by s=s(t). The default speed_linear mode uses
+%   lambda(t) = ds/dt = lambda0 + alpha*t,
+%   alpha = (lambda1-lambda0)/T,
+%   s(t) = lambda0*t + 0.5*alpha*t^2,
+%   T = 2*T0/(lambda0+lambda1),
+% so the progress speed grows linearly from lambda0 to lambda1 while exactly
+% finishing the base curve at t=T. speed_fixed uses lambda(t)=lambda_c and
+% T=T0/lambda_c. All reference derivatives below are recomputed by the chain
+% rule, not by finite differences.
+par.progress.mode = "speed_linear";   % "speed_linear" or "speed_fixed"
+par.progress.speedRange = [0, 3.2];   % speed_linear: start/end ds/dt multiplier
+par.progress.speed = 1;               % speed_fixed: constant ds/dt multiplier
+% For race_track_c, par.raceTrackMaxSpeed sets the physical target speed.
 
 % Available choices:
 %   "figure8_horizontal"
@@ -73,12 +88,14 @@ par.progress.scaleRange = [1, 0.3];   % scale_range: start/end scale over the si
 %   "helix_flip_y"
 %   "flip_loop_sine"
 %   "fast_circle"
-par.trajName = "fast_circle";
+%   "race_track_c"
+par.trajName = "helix_flip";
 
-% One knob for all trajectory shapes. The factory below converts it into
-% periods/radii using m, J, Tmax, tauMax, and progress.scaleRange.
+% One knob for dynamic aggressiveness. The factory converts physical scales
+% into periods using m, Tmax, and the final progress speed.
 par.trajIntensity = 1;  % 0 = gentle, 1 = near the actuator envelope
 par.helixTurns = 5;     % geometric turns; par.progress controls timing
+par.raceTrackMaxSpeed = 19.4; % [m/s], Sun Table VI Race Track C Vmax
 
 % controller
 % "geometric", "lee", "johnson", "px4_iris"
@@ -135,7 +152,7 @@ par.allocation.uMax = par.CT*ones(4,1);
 % Sun Eq. (9) aerodynamic model.
 % The body frame here is FRD/NED: body +z is opposite the collective thrust.
 par.aero.enabled = false;
-par.aero.kd = [0.26; 0.28; 0.42];
+par.aero.kd = [0.16; 0.18; 0.22];
 par.aero.kh = 0.01;
 
 % PX4 Iris controller: position -> attitude -> rate -> allocation.
@@ -226,14 +243,16 @@ par.sun.Qu = par.mpc.Qu;
 par.sun.QN = blkdiag(par.sun.Qxi, par.sun.Qv, par.sun.Qq, par.sun.QOmega);
 
 % Sun Table I, DFBC column. These are feedback/controller gains, not the
-% NMPC objective weights Qxi/Qv/Qq/QOmega above. Eq. (28) commands angular
-% acceleration alphaD, then tau = J*alphaD + Omega x J*Omega. Therefore an
-% equivalent moment gain is J*K; mapping moment gains into Eq. (28) uses J\K.
+% NMPC objective weights Qxi/Qv/Qq/QOmega above. Eq. (28) uses the quaternion
+% reduced-attitude vector qRed, whose small-angle roll/pitch components are
+% approximately 0.5*theta. Tal/geometric use full-angle log errors, so use a
+% factor of 2 on roll/pitch to keep comparable small-angle stiffness.
 par.sun.Kxi = par.Kp;
 par.sun.Kv = par.Kv;
-par.sun.KqRed = diag([par.KR(1,1), par.KR(2,2), 0]);
+par.sun.KqRed = diag([2*par.KR(1,1), 2*par.KR(2,2), 0]);
 par.sun.kqYaw = par.KR(3,3);
 par.sun.KOmega = par.KOmega;
+par.sun.allocationW = diag([0.001, 10, 10, 0.1]);
 par.sun.omegaMax = [10; 10; 4];
 sunRepoDir = string(fileparts(mfilename('fullpath')));
 if strlength(sunRepoDir) == 0
@@ -248,9 +267,6 @@ par.sun.acadosSourceDir = acadosSourceDir;
 par.sun.acadosToolsPath = fullfile(sunRepoDir, "tools");
 sunPython = string(getenv("ACADOS_PYTHON"));
 if strlength(sunPython) == 0
-    sunPython = string(getenv("SUN_NMPC_PYTHON"));
-end
-if strlength(sunPython) == 0
     projectSunPython = fullfile(sunRepoDir, ".venv", "bin", "python3");
     if exist(projectSunPython, "file") == 2
         sunPython = string(projectSunPython);
@@ -260,7 +276,7 @@ par.sun.pythonExecutable = sunPython;
 par.sun.solvePeriod = par.control.outerPeriod;  % NMPC refresh period Tc = 100 Hz.
 par.sun.indiPeriod = par.control.innerPeriod;   % 250 Hz INDI inner-loop refresh.
 par.sun.printSolverTiming = false;
-par.sun.filterCutoffHz = 12;
+par.sun.innerLoopFilterCutoffHz = par.indi.innerLoopFilterCutoffHz;
 % d_tau is not modeled as a known input; Sun's INDI loop absorbs it through
 % filtered angular-acceleration and rotor-thrust feedback.
 
@@ -270,6 +286,10 @@ par.geometric_indi.Kp = par.Kp;
 par.geometric_indi.Kv = par.Kv;
 par.geometric_indi.Ktheta = par.KR;
 par.geometric_indi.Komega = par.KOmega;
+% Match Tal's INDI practice: filter measured acceleration/rate feedback
+% before using it in incremental inversion.
+par.geometric_indi.innerLoopFilterCutoffHz = par.indi.innerLoopFilterCutoffHz;
+par.geometric_indi.outerLoopFilterCutoffHz = par.indi.outerLoopFilterCutoffHz;
 
 % [3] E. Tal and S. Karaman, “Accurate Tracking of Aggressive Quadrotor Trajectories Using Incremental Nonlinear Dynamic Inversion and Differential Flatness,” IEEE Trans. Contr. Syst. Technol., vol. 29, no. 3, pp. 1203–1218, May 2021, doi: 10.1109/tcst.2020.3001117.
 % Tal and Karaman INDI + differential-flatness controller.
@@ -283,22 +303,38 @@ par.tal.Ka = 0.0*eye(3);                 % Eq. (17), acceleration term
 par.tal.Ktheta = par.KR;
 par.tal.Komega = par.KOmega;
 % Fig. 4: identical second-order Butterworth LPFs, 30 Hz cutoff.
-par.tal.filterCutoffHz = 30;
+par.tal.innerLoopFilterCutoffHz = par.indi.innerLoopFilterCutoffHz;
+par.tal.outerLoopFilterCutoffHz = par.indi.outerLoopFilterCutoffHz;
 
-% Additive plant disturbances. Set enabled=false for the no-disturbance
-% baseline. When enabled, type must be "constant" or "sin".
+% Measurement noise injected only into controller feedback. These are
+% deliberately challenging state-estimate RMS levels, not raw sensor noise.
+% The plant state x remains true; controllers get xMeas.
+par.feedbackNoise.enabled = true;
+par.feedbackNoise.seed = 4301;
+par.feedbackNoise.positionStd = [0.08; 0.08; 0.1];       % [m]
+par.feedbackNoise.velocityStd = [0.04; 0.04; 0.04];       % [m/s]
+par.feedbackNoise.attitudeStd = deg2rad([0.034; 0.034; 0.068]); % [rad]
+par.feedbackNoise.omegaStd = deg2rad([0.01; 0.01; 0.01]);    % [rad/s]
+
+% Additive plant disturbances. main.m defaults to the disturbance benchmark's
+% medium random_gust case. Set enabled=false for the no-disturbance baseline.
+% When enabled, type must be "constant", "sin", or "random".
 % The force disturbance is expressed in inertial NED coordinates [N]; the
 % moment disturbance is expressed in the body frame [N*m].
 par.disturbance.enabled = true;
-par.disturbance.type = "sin";
-% Disturbance amplitudes are explicit per-axis 3x1 vectors. Yaw torque
-% should stay much smaller than roll/pitch.
-par.disturbance.forceAmp = [0.10; 0.10; 0.06];      % [Fx; Fy; Fz] amplitude [N]
-par.disturbance.momentAmp = [0.010; 0.010; 0.001];  % [Mx; My; Mz] amplitude [N*m]
+par.disturbance.type = "random";
+par.disturbance.seed = 2401;
+par.disturbance.sampleTime = par.dt;
+% For constant/sin, these are amplitudes. For random, they are stationary
+% RMS levels of a first-order Gauss-Markov gust/load process.
+par.disturbance.forceAmp = [0.30; 0.30; 0.15];      % [Fx; Fy; Fz] [N]
+par.disturbance.momentAmp = [0.050; 0.050; 0.005];  % [Mx; My; Mz] [N*m]
 par.disturbance.forceFreq = [0.17; 0.23; 0.31];   % sinusoid frequencies [Hz]
 par.disturbance.momentFreq = [0.19; 0.29; 0.37];  % sinusoid frequencies [Hz]
-par.disturbance.forcePhase = [0; 2*pi/3; 4*pi/3];
+par.disturbance.forcePhase = [0; 1*pi/3; 2*pi/3];
 par.disturbance.momentPhase = [pi/4; 3*pi/4; 5*pi/4];
+par.disturbance.forceTau = [1.5; 1.5; 1.0];        % random correlation time [s]
+par.disturbance.momentTau = [0.35; 0.35; 0.25];    % random correlation time [s]
 par.disturbance.startTime = 0;
 par.disturbance.endTime = inf;
 
@@ -307,9 +343,9 @@ par.startOnReference = true;
 
 % Post-simulation plotting
 par.enablePlots = true;
-par.saveResults = true;
+par.saveResults = false;
 par.saveFigures = false;
-par.saveMat = true;
+par.saveMat = false;
 par.resultDir = fullfile(pwd, "results", "main");
 par.plotStateDetail = true;        % Optional state/component tracking detail.
 par.plotBodyAxes = false;
@@ -379,9 +415,12 @@ end
 %% 3. Logs
 time = 0:par.dt:par.Tend;
 N = numel(time);
+par = prepareRandomModels(par, time);
 
 log.p = zeros(3,N);
 log.v = zeros(3,N);
+log.pMeas = zeros(3,N);
+log.vMeas = zeros(3,N);
 log.pd = zeros(3,N);
 log.vd = zeros(3,N);
 log.ad = zeros(3,N);
@@ -389,8 +428,10 @@ log.vPlotD = zeros(3,N);
 log.aPlotD = zeros(3,N);
 
 log.R = zeros(3,3,N);
+log.RMeas = zeros(3,3,N);
 log.Rd = zeros(3,3,N);
 log.Omega = zeros(3,N);
+log.OmegaMeas = zeros(3,N);
 log.OmegaD = nan(3,N);
 log.alphaD = nan(3,N);
 log.OmegaDProvided = false(1,N);
@@ -417,10 +458,13 @@ for k = 1:N
     t = time(k);
 
     ref = traj.eval(t);
-    u = controller(x, ref, traj, t, par);
+    xMeas = measuredStateAtIndex(x, k, par);
+    u = controller(xMeas, ref, traj, t, par);
 
     log.p(:,k) = x.p;
     log.v(:,k) = x.v;
+    log.pMeas(:,k) = xMeas.p;
+    log.vMeas(:,k) = xMeas.v;
     log.pd(:,k) = ref.p;
     log.vd(:,k) = ref.v;
     log.ad(:,k) = ref.a;
@@ -434,8 +478,10 @@ for k = 1:N
     end
 
     log.R(:,:,k) = x.R;
+    log.RMeas(:,:,k) = xMeas.R;
     log.Rd(:,:,k) = u.Rd;
     log.Omega(:,k) = x.Omega;
+    log.OmegaMeas(:,k) = xMeas.Omega;
     if isfield(u, 'OmegaD')
         log.OmegaD(:,k) = u.OmegaD;
         log.OmegaDProvided(k) = true;
@@ -533,6 +579,12 @@ function traj = makeTrajectory(par)
             cfg = makeFastCircleParams(shape);
             traj.eval = @(t) evalFastCircle(t, cfg);
 
+        case "race_track_c"
+            traj.name = "race_track_c";
+            cfg = makeRaceTrackCParams(shape);
+            traj.Tend = cfg.Ttrack;
+            traj.eval = @(t) evalRaceTrackC(t, cfg);
+
         otherwise
             error("Unknown trajectory name.");
     end
@@ -546,108 +598,123 @@ function traj = applyTrajectoryProgress(traj, par)
     baseTend = traj.Tend;
 
     switch par.progress.mode
-        case "scale_fixed"
-            scale = par.progress.scale;
+        case "speed_fixed"
+            speed = par.progress.speed;
 
-            if scale <= 0
-                error("Trajectory time scale must be positive.");
+            if speed <= 0
+                error("Trajectory speed multiplier must be positive.");
             end
 
-            traj.Tend = scale*baseTend;
-            traj.eval = @(t) evalProgressTrajectory( ...
-                baseEval, t/scale, 1/scale, 0, 0, 0, baseTend);
-            traj.evalPredict = @(t) evalProgressTrajectory( ...
-                baseEval, t/scale, 1/scale, 0, 0, 0, baseTend, true);
+            traj.Tend = speedFixedDuration(baseTend, speed);
+            traj.name = traj.name + "_speedFixed_" + string(speed);
+            traj.eval = @(t) evalSpeedFixedTrajectory( ...
+                baseEval, baseTend, t, traj.Tend, speed);
+            traj.evalPredict = @(t) evalSpeedFixedTrajectory( ...
+                baseEval, baseTend, t, traj.Tend, speed, true);
 
-            if abs(scale - 1) >= 1e-12
-                traj.name = traj.name + "_timeScale_" + string(scale);
+        case "speed_linear"
+            speedRange = par.progress.speedRange;
+
+            if any(speedRange < 0) || sum(speedRange) <= 0
+                error("Trajectory speed multiplier must be nonnegative and not both zero.");
             end
 
-        case "scale_range"
-            scaleRange = par.progress.scaleRange;
-
-            if any(scaleRange <= 0)
-                error("Trajectory time scale must be positive.");
-            end
-
-            traj.Tend = scaleRangeDuration(baseTend, scaleRange);
-            traj.name = traj.name + "_scaleRange_" + string(scaleRange(1)) ...
-                      + "_" + string(scaleRange(2));
-            traj.eval = @(t) evalScaleRangeTrajectory( ...
-                baseEval, baseTend, t, traj.Tend, scaleRange);
-            traj.evalPredict = @(t) evalScaleRangeTrajectory( ...
-                baseEval, baseTend, t, traj.Tend, scaleRange, true);
+            traj.Tend = speedLinearDuration(baseTend, speedRange);
+            traj.name = traj.name + "_speedLinear_" + string(speedRange(1)) ...
+                      + "_" + string(speedRange(2));
+            traj.eval = @(t) evalSpeedLinearTrajectory( ...
+                baseEval, baseTend, t, traj.Tend, speedRange);
+            traj.evalPredict = @(t) evalSpeedLinearTrajectory( ...
+                baseEval, baseTend, t, traj.Tend, speedRange, true);
 
         otherwise
             error("Unknown progress mode.");
     end
 end
 
-function simTend = scaleRangeDuration(baseTend, scaleRange)
+function simTend = speedFixedDuration(baseTend, speed)
 
-    scale0 = scaleRange(1);
-    scale1 = scaleRange(2);
-
-    if abs(scale1 - scale0) < 1e-12
-        simTend = scale0*baseTend;
-    else
-        simTend = baseTend*(scale0 - scale1)/log(scale0/scale1);
-    end
+    simTend = baseTend/speed;
 end
 
-function ref = evalScaleRangeTrajectory( ...
-        baseEval, baseTend, t, simTend, scaleRange, allowPredict)
+function simTend = speedLinearDuration(baseTend, speedRange)
+
+    simTend = 2*baseTend/(speedRange(1) + speedRange(2));
+end
+
+function ref = evalSpeedLinearTrajectory( ...
+        baseEval, baseTend, t, simTend, speedRange, allowPredict)
 
     if nargin < 6
         allowPredict = false;
     end
 
-    scale0 = scaleRange(1);
-    scale1 = scaleRange(2);
-    scaleDot = (scale1 - scale0)/simTend;
+    speed0 = speedRange(1);
+    speed1 = speedRange(2);
+    speedDot = (speed1 - speed0)/simTend;
 
     if allowPredict && t > simTend
         tClip = simTend;
-        scale = scale1;
-    else
-        alpha = min(max(t/simTend, 0), 1);
-        tClip = alpha*simTend;
-        scale = scale0 + scaleDot*tClip;
-    end
-
-    if scale <= 0
-        error("Trajectory time scale became non-positive.");
-    end
-
-    % The scale is instantaneous: ds/dt = 1/scale(t).
-    if abs(scaleDot) < 1e-12
-        s = tClip/scale0;
-    else
-        s = log(scale/scale0)/scaleDot;
-    end
-
-    if allowPredict && t > simTend
-        s = s + (t - simTend)/scale1;
-        sDot = 1/scale1;
+        % MPC prediction beyond the simulated trajectory end: keep moving on
+        % the same geometric curve at the terminal progress speed lambda1.
+        % This avoids presenting the finite horizon with an artificial stop:
+        %   s(t) = T0 + lambda1*(t-T), ds/dt=lambda1, d2s/dt2=0.
+        s = baseTend + speed1*(t - simTend);
+        sDot = speed1;
         sDDot = 0;
-        sDDDot = 0;
-        sDDDDot = 0;
     else
-        sDot = 1/scale;
-        sDDot = -scaleDot/scale^2;
-        sDDDot = 2*scaleDot^2/scale^3;
-        sDDDDot = -6*scaleDot^3/scale^4;
+        tClip = min(max(t, 0), simTend);
+        if tClip >= simTend - 10*eps(max(simTend, 1))
+            s = baseTend;
+            sDot = speed1;
+        else
+            s = speed0*tClip + 0.5*speedDot*tClip^2;
+            sDot = speed0 + speedDot*tClip;
+        end
+        sDDot = speedDot;
     end
 
     ref = evalProgressTrajectory( ...
-        baseEval, s, sDot, sDDot, sDDDot, sDDDDot, ...
-        baseTend, allowPredict);
+        baseEval, s, sDot, sDDot, 0, 0, baseTend, allowPredict);
+end
+
+function ref = evalSpeedFixedTrajectory( ...
+        baseEval, baseTend, t, simTend, speed, allowPredict)
+
+    if nargin < 6
+        allowPredict = false;
+    end
+
+    if allowPredict && t > simTend
+        s = baseTend + speed*(t - simTend);
+    else
+        tClip = min(max(t, 0), simTend);
+        if tClip >= simTend - 10*eps(max(simTend, 1))
+            s = baseTend;
+        else
+            s = speed*tClip;
+        end
+    end
+
+    ref = evalProgressTrajectory( ...
+        baseEval, s, speed, 0, 0, 0, baseTend, allowPredict);
 end
 
 function ref = evalProgressTrajectory( ...
         baseEval, s, sDot, sDDot, sDDDot, sDDDDot, ...
         baseTend, allowPredict)
 
+    % Time reparameterization derivatives for the paper:
+    % Let r_d(t)=r0(s(t)), lambda=s_dot, beta=s_ddot,
+    % gamma=s^(3), delta=s^(4). If primes denote d/ds, then
+    %   v_d     = r0' lambda
+    %   a_d     = r0'' lambda^2 + r0' beta
+    %   j_d     = r0''' lambda^3 + 3 r0'' lambda beta + r0' gamma
+    %   s_d     = r0'''' lambda^4 + 6 r0''' lambda^2 beta
+    %             + 3 r0'' beta^2 + 4 r0'' lambda gamma + r0' delta.
+    % The same scalar chain rule is applied to the base yaw psi0(s):
+    %   psi_dot = psi0' lambda,
+    %   psi_ddot = psi0'' lambda^2 + psi0' beta.
     if nargin < 8
         allowPredict = false;
     end
@@ -697,23 +764,22 @@ function scale = trajectoryScaleAtFraction(par, fraction)
     end
 
     switch string(par.progress.mode)
-        case "scale_range"
-            scaleRange = par.progress.scaleRange;
-            scale = scaleRange(1) + (scaleRange(2) - scaleRange(1))*fraction;
-        case "scale_fixed"
-            scale = par.progress.scale;
+        case "speed_linear"
+            speedRange = par.progress.speedRange;
+            speed = speedRange(1) + (speedRange(2) - speedRange(1))*fraction;
+        case "speed_fixed"
+            speed = par.progress.speed;
         otherwise
-            scale = 1;
+            speed = 1;
     end
 
-    scale = max(scale, eps);
+    scale = 1/max(speed, eps);
 end
 
 
 function shape = trajectoryShape(par)
 
     intensity = min(max(getStructField(par, 'trajIntensity', 0.75), 0), 1);
-    scaleHalf = trajectoryScaleAtFraction(par, 0.5);
     scaleEnd = trajectoryScaleAtFraction(par, 1.0);
 
     thrustAccel = max(par.Tmax/max(par.m, eps) - par.g, 0.5*par.g);
@@ -724,15 +790,15 @@ function shape = trajectoryShape(par)
     shape.helixAccel = (0.12 + 0.10*intensity)*min(thrustAccel, par.g);
     shape.regularAccel = max((0.18 + 0.20*intensity)*thrustAccel*scaleEnd^2, ...
         0.10*par.g*scaleEnd^2);
-
-    frontFlipMax = (0.93 + 0.04*intensity)*par.g*scaleHalf^2;
-    rearFlipMin = (1.02 + 0.10*intensity)*par.g*scaleEnd^2;
-    rearFlipTarget = (1.08 + 0.35*intensity ...
-                    + 0.80*max(shape.helixTurns - 1, 0))*par.g*scaleEnd^2;
-    thrustFlipMax = ((0.70 + 0.18*intensity)*par.Tmax/max(par.m, eps) ...
-                   - par.g)*scaleEnd^2;
-    flipCap = min([frontFlipMax, rearFlipTarget, thrustFlipMax]);
-    shape.flipAccel = min(frontFlipMax, max(rearFlipMin, flipCap));
+    shape.longAmp = 2.5;
+    shape.shortAmp = 1.5;
+    shape.circleRadius = 3.0;
+    shape.cruiseHeight = 3.0;
+    shape.lowHeight = 1.0;
+    shape.raceTrackMaxSpeed = max(double(getStructField(par, ...
+        'raceTrackMaxSpeed', 19.4)), 1);
+    shape.raceTrackCenter = [3.75; 0.50];
+    shape.raceTrackAxes = [8.75; 4.50];
 
 end
 
@@ -938,9 +1004,150 @@ function [forceDist, momentDist] = disturbanceAtTime(t, par)
             forceDist = forceAmp .* sin(2*pi*forceFreq*t + forcePhase);
             momentDist = momentAmp .* sin(2*pi*momentFreq*t + momentPhase);
 
+        case "random"
+            if ~isfield(d, 'random') ...
+                    || ~isfield(d.random, 'force') ...
+                    || ~isfield(d.random, 'moment')
+                error("Random disturbance was not initialized.");
+            end
+            forceDist = sampleUniformSeries(t, d.random.time, d.random.force);
+            momentDist = sampleUniformSeries(t, d.random.time, d.random.moment);
+
         otherwise
             error("Unknown disturbance type.");
     end
+end
+
+function par = prepareRandomModels(par, time)
+
+    if isfield(par, 'feedbackNoise') && par.feedbackNoise.enabled
+        par.feedbackNoise.samples = generateFeedbackNoiseSamples( ...
+            par.feedbackNoise, numel(time));
+    end
+
+    if isfield(par, 'disturbance') ...
+            && par.disturbance.enabled ...
+            && string(par.disturbance.type) == "random"
+        par.disturbance.random = generateRandomDisturbanceSamples( ...
+            par.disturbance, time);
+    end
+end
+
+function samples = generateFeedbackNoiseSamples(noise, nSamples)
+
+    stream = RandStream('mt19937ar', ...
+        'Seed', normalizedSeed(getStructField(noise, 'seed', 0)));
+
+    samples.p = vector3Param(getStructField(noise, ...
+        'positionStd', zeros(3,1)), 'feedbackNoise.positionStd') ...
+        .* randn(stream, 3, nSamples);
+    samples.v = vector3Param(getStructField(noise, ...
+        'velocityStd', zeros(3,1)), 'feedbackNoise.velocityStd') ...
+        .* randn(stream, 3, nSamples);
+    samples.attitude = vector3Param(getStructField(noise, ...
+        'attitudeStd', zeros(3,1)), 'feedbackNoise.attitudeStd') ...
+        .* randn(stream, 3, nSamples);
+    samples.omega = vector3Param(getStructField(noise, ...
+        'omegaStd', zeros(3,1)), 'feedbackNoise.omegaStd') ...
+        .* randn(stream, 3, nSamples);
+end
+
+function samples = generateRandomDisturbanceSamples(d, time)
+
+    if numel(time) >= 2
+        defaultSampleTime = time(2) - time(1);
+    else
+        defaultSampleTime = 0.01;
+    end
+
+    sampleTime = double(getStructField(d, 'sampleTime', defaultSampleTime));
+    if ~isfinite(sampleTime) || sampleTime <= 0
+        sampleTime = defaultSampleTime;
+    end
+
+    tEnd = max(time(end), 0) + sampleTime;
+    samples.time = 0:sampleTime:tEnd;
+    nSamples = numel(samples.time);
+
+    stream = RandStream('mt19937ar', ...
+        'Seed', normalizedSeed(getStructField(d, 'seed', 0)));
+
+    forceAmp = vector3Param(getStructField(d, ...
+        'forceAmp', zeros(3,1)), 'disturbance.forceAmp');
+    momentAmp = vector3Param(getStructField(d, ...
+        'momentAmp', zeros(3,1)), 'disturbance.momentAmp');
+    forceTau = vector3Param(getStructField(d, ...
+        'forceTau', ones(3,1)), 'disturbance.forceTau');
+    momentTau = vector3Param(getStructField(d, ...
+        'momentTau', 0.25*ones(3,1)), 'disturbance.momentTau');
+
+    samples.force = forceAmp .* gaussMarkovUnitSamples( ...
+        stream, nSamples, sampleTime, forceTau);
+    samples.moment = momentAmp .* gaussMarkovUnitSamples( ...
+        stream, nSamples, sampleTime, momentTau);
+end
+
+function values = gaussMarkovUnitSamples(stream, nSamples, sampleTime, tau)
+
+    tau = max(tau(:), eps);
+    phi = exp(-sampleTime ./ tau);
+    sigma = sqrt(max(0, 1 - phi.^2));
+
+    values = zeros(3, nSamples);
+    if nSamples == 0
+        return;
+    end
+
+    values(:,1) = randn(stream, 3, 1);
+    for kSample = 2:nSamples
+        values(:,kSample) = phi .* values(:,kSample-1) ...
+            + sigma .* randn(stream, 3, 1);
+    end
+end
+
+function xMeas = measuredStateAtIndex(x, k, par)
+
+    xMeas = x;
+    if ~isfield(par, 'feedbackNoise') || ~par.feedbackNoise.enabled
+        return;
+    end
+
+    if ~isfield(par.feedbackNoise, 'samples')
+        error("Feedback noise was not initialized.");
+    end
+
+    nSamples = size(par.feedbackNoise.samples.p, 2);
+    iSample = min(max(1, k), nSamples);
+
+    xMeas.p = x.p + par.feedbackNoise.samples.p(:,iSample);
+    xMeas.v = x.v + par.feedbackNoise.samples.v(:,iSample);
+    dtheta = par.feedbackNoise.samples.attitude(:,iSample);
+    xMeas.R = projectSO3(x.R*expm(hat(dtheta)));
+    xMeas.Omega = x.Omega + par.feedbackNoise.samples.omega(:,iSample);
+end
+
+function y = sampleUniformSeries(t, time, values)
+
+    if isempty(time)
+        y = zeros(size(values, 1), 1);
+        return;
+    end
+
+    if isscalar(time) || t <= time(1)
+        y = values(:,1);
+        return;
+    end
+
+    if t >= time(end)
+        y = values(:,end);
+        return;
+    end
+
+    sampleTime = time(2) - time(1);
+    idx = floor((t - time(1))/sampleTime) + 1;
+    idx = min(max(1, idx), numel(time) - 1);
+    alpha = (t - time(idx))/sampleTime;
+    y = (1 - alpha)*values(:,idx) + alpha*values(:,idx+1);
 end
 
 function value = getStructField(s, name, defaultValue)
@@ -976,6 +1183,28 @@ function v = vector3(x)
     end
 end
 
+function v = vector3Param(x, name)
+
+    if isscalar(x)
+        v = repmat(double(x), 3, 1);
+    else
+        v = x(:);
+    end
+
+    if numel(v) ~= 3
+        error("%s must be scalar or 3x1.", name);
+    end
+end
+
+function seed = normalizedSeed(seed)
+
+    seed = double(seed);
+    if ~isscalar(seed) || ~isfinite(seed)
+        seed = 0;
+    end
+    seed = mod(round(seed), 2^31 - 1);
+end
+
 function ref = completeReferenceDerivatives(ref)
 
     if ~isfield(ref, 'j')
@@ -997,6 +1226,18 @@ end
 
 function ref = setHeadingFromVelocity(ref, defaultPsi)
 
+    % Heading law used by the horizontal figure-eight, fast circle, and race
+    % track base curves:
+    %   psi0(s) = atan2(y0'(s), x0'(s)).
+    % Since the base curve evaluator already returns derivatives with respect
+    % to its argument, this helper applies the equivalent time-domain formulas
+    % before the outer s=s(t) reparameterization:
+    %   psi_dot = (v_x*a_y - v_y*a_x)/(v_x^2 + v_y^2),
+    %   psi_ddot = ((v_x*j_y - v_y*j_x)*(v_x^2+v_y^2)
+    %               - (v_x*a_y - v_y*a_x)*2*(v_x*a_x+v_y*a_y))
+    %              /(v_x^2+v_y^2)^2.
+    % If the horizontal speed is zero, psi0 is undefined and defaultPsi is
+    % used with zero yaw derivatives.
     speed2 = ref.v(1)^2 + ref.v(2)^2;
 
     if speed2 < 1e-10
@@ -1019,38 +1260,11 @@ end
 
 function ref = setConstantHeading(ref, psi)
 
+    % Heading law used by vertical/flip trajectories:
+    %   psi0(s) = psi_c, psi0'(s) = psi0''(s) = 0.
     ref.psi = psi;
     ref.psiDot = 0;
     ref.psiDDot = 0;
-end
-
-function [q, qDot, qDDot, q3, q4] = rampedTime(t, tRamp)
-
-    if t <= 0
-        q = 0;
-        qDot = 0;
-        qDDot = 0;
-        q3 = 0;
-        q4 = 0;
-        return;
-    end
-
-    if t >= tRamp
-        q = t - 0.5*tRamp;
-        qDot = 1;
-        qDDot = 0;
-        q3 = 0;
-        q4 = 0;
-        return;
-    end
-
-    sigma = t/tRamp;
-
-    q = 0.5*t - 0.5*tRamp/pi*sin(pi*sigma);
-    qDot = 0.5*(1 - cos(pi*sigma));
-    qDDot = 0.5*pi/tRamp*sin(pi*sigma);
-    q3 = 0.5*pi^2/tRamp^2*cos(pi*sigma);
-    q4 = -0.5*pi^3/tRamp^3*sin(pi*sigma);
 end
 
 function [y, yd, ydd, y3, y4] = trigDerivatives( ...
@@ -1087,13 +1301,19 @@ end
 
 %% ========================================================================
 %% Analytic horizontal figure-eight
+% Base curve:
+%   theta = Omega*s,
+%   r0(s) = [Ax*sin(theta);
+%            Ay*sin(2*theta);
+%            -h0].
+%   psi0(s) = atan2(y0'(s), x0'(s)).
 function cfg = makeFigure8HorizontalParams(shape)
 
-    cfg.Ax = 4.0;
-    cfg.Ay = 2.5;
-    cfg.h0 = 3.0;
+    cfg.Ax = shape.longAmp;
+    cfg.Ay = shape.shortAmp;
+    cfg.h0 = shape.cruiseHeight;
     cfg.Tfig = periodForAccel(max(cfg.Ax, 4*cfg.Ay), ...
-        shape.regularAccel, 7.0, 13.0);
+        shape.regularAccel, 7.0, shape.baseTend);
 end
 
 function ref = evalFigure8Horizontal(t, cfg)
@@ -1115,17 +1335,21 @@ end
 
 %% ========================================================================
 %% Analytic vertical figure-eight
+% Base curve:
+%   theta = theta0 + Omega*s,
+%   r0(s) = [0;
+%            Ay*sin(theta);
+%            -(hLow+Az) - Az*sin(2*theta)].
+%   psi0(s) = 0.
 function cfg = makeFigure8VerticalParams(shape)
 
-    cfg.Ay = 1.15;
-    cfg.Az = 1.00;
-    cfg.hLow = 1.35;
-    cfg.tHover = 1.0;
-    cfg.tRamp = 1.50;
+    cfg.Ay = shape.longAmp;
+    cfg.Az = shape.shortAmp;
+    cfg.hLow = shape.lowHeight;
     cfg.theta0 = -pi/4;
-    accelLimit = min(shape.regularAccel, 0.80*shape.g*shape.scaleEnd^2);
+    accelLimit = shape.regularAccel;
     cfg.Tfig = periodForAccel(max(cfg.Ay, 4*cfg.Az), ...
-        accelLimit, 4.8, 8.0);
+        accelLimit, 7.0, shape.baseTend);
 end
 
 function ref = evalFigure8Vertical(t, cfg)
@@ -1133,24 +1357,11 @@ function ref = evalFigure8Vertical(t, cfg)
     hCenter = cfg.hLow + cfg.Az;
     Om = 2*pi/cfg.Tfig;
 
-    if t <= cfg.tHover
-        ref.p = [0; -cfg.Ay/sqrt(2); -cfg.hLow];
-        ref.v = [0; 0; 0];
-        ref.a = [0; 0; 0];
-        ref.j = [0; 0; 0];
-        ref.s = [0; 0; 0];
-        ref = setConstantHeading(ref, 0);
-        return;
-    end
-
-    tau = t - cfg.tHover;
-    [q, qDot, qDDot, q3, q4] = rampedTime(tau, cfg.tRamp);
-
-    theta = cfg.theta0 + Om*q;
-    thetaDot = Om*qDot;
-    thetaDDot = Om*qDDot;
-    theta3 = Om*q3;
-    theta4 = Om*q4;
+    theta = cfg.theta0 + Om*t;
+    thetaDot = Om;
+    thetaDDot = 0;
+    theta3 = 0;
+    theta4 = 0;
 
     [y, vy, ay, jy, sy] = trigDerivatives( ...
         cfg.Ay, theta, thetaDot, thetaDDot, theta3, theta4, "sin");
@@ -1168,6 +1379,14 @@ end
 
 %% ========================================================================
 %% Analytic x-forward helix_flip
+% Base curve:
+%   theta = omega*s, omega = 2*pi*N/T0,
+%   r0(s) = [(r*N/T0)*s;
+%            r*sin(theta);
+%            -hCenter + r*cos(theta)].
+% helix_flip_y swaps the forward axis from x to y, and flip_loop_sine removes
+% the forward translation.
+%   psi0(s) = 0.
 function cfg = makeHelixFlipParams(shape)
 
     cfg.turns = shape.helixTurns;
@@ -1235,12 +1454,58 @@ function ref = evalFlipLoop(t, cfg)
 end
 
 %% ========================================================================
+%% Analytic Sun-style high-speed Race Track C
+% Sun-style high-speed racing benchmark.
+% Table VI in Sun et al. reports Race Track C with Vmax=19.4 m/s and
+% amax=37.3 m/s^2. Fig. 13 shows an approximately x=[-5,12.5] m,
+% y=[-4,5] m ground track. We use the smooth ellipse
+%   theta = theta0 + omega*s,
+%   r0(s) = [cx + Ax*cos(theta);
+%            cy + Ay*sin(theta);
+%            -h0],
+% with Ax=8.75 m, Ay=4.5 m, center=[3.75,0.5] m. omega is selected so the
+% final speed after the selected progress reparameterization reaches 19.4 m/s.
+%   psi0(s) = atan2(y0'(s), x0'(s)).
+function cfg = makeRaceTrackCParams(shape)
+
+    cfg.center = shape.raceTrackCenter(:);
+    cfg.Ax = shape.raceTrackAxes(1);
+    cfg.Ay = shape.raceTrackAxes(2);
+    cfg.h0 = shape.cruiseHeight;
+    cfg.theta0 = pi/2;
+    cfg.omega = shape.raceTrackMaxSpeed*shape.scaleEnd/cfg.Ax;
+    cfg.Ttrack = 2*pi/cfg.omega;
+end
+
+function ref = evalRaceTrackC(t, cfg)
+
+    theta = cfg.theta0 + cfg.omega*t;
+
+    [x, vx, ax, jx, sx] = trigDerivatives( ...
+        cfg.Ax, theta, cfg.omega, 0, 0, 0, "cos");
+    [y, vy, ay, jy, sy] = trigDerivatives( ...
+        cfg.Ay, theta, cfg.omega, 0, 0, 0, "sin");
+
+    ref.p = [cfg.center(1) + x; cfg.center(2) + y; -cfg.h0];
+    ref.v = [vx; vy; 0];
+    ref.a = [ax; ay; 0];
+    ref.j = [jx; jy; 0];
+    ref.s = [sx; sy; 0];
+    ref = setHeadingFromVelocity(ref, 0);
+end
+
+%% ========================================================================
 %% Analytic fast horizontal circle
+% Base curve:
+%   theta = Omega*s,
+%   r0(s) = [r*cos(theta); r*sin(theta); -h0].
+%   psi0(s) = atan2(y0'(s), x0'(s)).
 function cfg = makeFastCircleParams(shape)
 
-    cfg.radius = 5.0;
-    cfg.h0 = 5.0;
-    cfg.Tcircle = periodForAccel(cfg.radius, shape.regularAccel, 5.0, 10.0);
+    cfg.radius = shape.circleRadius;
+    cfg.h0 = shape.cruiseHeight;
+    cfg.Tcircle = periodForAccel(cfg.radius, shape.regularAccel, 5.0, ...
+        shape.baseTend);
 end
 
 function ref = evalFastCircle(t, cfg)
@@ -2037,15 +2302,15 @@ function u = controllerTal(x, ref, ~, t, par)
         rawMuF = st.tau;
 
         [aFilt, st.aFilter] = secondOrderButterworthLPF( ...
-            rawAFilt, st.aFilter, h, par.tal.filterCutoffHz);
+            rawAFilt, st.aFilter, h, par.tal.outerLoopFilterCutoffHz);
         [omegaF, st.omegaFilter] = secondOrderButterworthLPF( ...
-            rawOmegaF, st.omegaFilter, h, par.tal.filterCutoffHz);
+            rawOmegaF, st.omegaFilter, h, par.tal.innerLoopFilterCutoffHz);
         [omegaDotF, st.omegaDotFilter] = secondOrderButterworthLPF( ...
-            rawOmegaDotF, st.omegaDotFilter, h, par.tal.filterCutoffHz);
+            rawOmegaDotF, st.omegaDotFilter, h, par.tal.innerLoopFilterCutoffHz);
         [thrustAccelF, st.thrustAccelFilter] = secondOrderButterworthLPF( ...
-            rawThrustAccelF, st.thrustAccelFilter, h, par.tal.filterCutoffHz);
+            rawThrustAccelF, st.thrustAccelFilter, h, par.tal.outerLoopFilterCutoffHz);
         [muF, st.muFilter] = secondOrderButterworthLPF( ...
-            rawMuF, st.muFilter, h, par.tal.filterCutoffHz);
+            rawMuF, st.muFilter, h, par.tal.innerLoopFilterCutoffHz);
     end
 
     % Eq. (17): commanded acceleration with acceleration feedback:
@@ -2492,11 +2757,7 @@ function refs = sunNMPCBuildReferences(traj, t, N, h, par)
 
     for k = 1:N+1
         tk = t + (k-1)*h;
-        if isfield(traj, 'evalPredict')
-            ref = traj.evalPredict(tk);
-        else
-            ref = traj.eval(min(tk, par.Tend));
-        end
+        ref = predictionReferenceAtTime(traj, tk, par);
         ff = sunAeroFlatnessReference(ref, par);
 
         refs.p(:,k) = ref.p;
@@ -2512,6 +2773,19 @@ function refs = sunNMPCBuildReferences(traj, t, N, h, par)
         refs.tau(:,k) = par.J*refs.alpha(:,k) ...
             + cross(refs.Omega(:,k), par.J*refs.Omega(:,k));
         refs.u(:,k) = sunDirectAllocation([refs.T(k); refs.tau(:,k)], par);
+    end
+end
+
+function ref = predictionReferenceAtTime(traj, tk, par)
+
+    % Receding-horizon controllers should not see a terminal stop just because
+    % tk lies past the simulated logging interval. For trajectories created by
+    % this factory, evalPredict extrapolates the geometric curve with the final
+    % progress speed. The fallback is only for externally supplied trajectories.
+    if isfield(traj, 'evalPredict')
+        ref = traj.evalPredict(tk);
+    else
+        ref = traj.eval(min(tk, par.Tend));
     end
 end
 
@@ -2533,6 +2807,35 @@ function u = controlAllocation(mu, Rd, par)
     % vector is multiplied by the allocation matrix to obtain the wrench
     % applied to the rigid-body model.
     u.muAllocated = par.allocation.B*u.actuator(:);
+    u.T = -u.muAllocated(1);
+    u.tau = u.muAllocated(2:4);
+end
+
+function u = sunDFBCAllocation(mu, Rd, par)
+
+    if par.allocation.method ~= "wls"
+        u = controlAllocation(mu, Rd, par);
+        return;
+    end
+
+    muCmd = [-mu(1); mu(2:4)];
+    B = par.allocation.B;
+    lb = par.allocation.uMin(:);
+    ub = par.allocation.uMax(:);
+    Wq = par.sun.allocationW;
+    Wv = diag(sqrt(diag(Wq)));
+    Wu = eye(numel(lb));
+    ud = zeros(numel(lb),1);
+    gamma = double(getStructField(par.allocation, 'gamma', 1e6));
+    u0 = (lb + ub)/2;
+    W0 = zeros(numel(lb),1);
+
+    actuator = wls_alloc(B, muCmd(:), lb, ub, Wv, Wu, ud, gamma, u0, W0, 100);
+    actuator = min(max(actuator(:), lb), ub);
+
+    u.Rd = Rd;
+    u.actuator = actuator;
+    u.muAllocated = B*u.actuator(:);
     u.T = -u.muAllocated(1);
     u.tau = u.muAllocated(2:4);
 end
@@ -2733,7 +3036,7 @@ function cmd = sunDFBCCommand(x, ref, ~, t, par)
     % Sun Eq. (31): constrained allocation from desired [T;tau] to rotor
     % thrust commands. Use the benchmark-unified allocation implementation;
     % with par.allocation.method="wls" this is the QCAT/test.m WLS setup.
-    uAlloc = controlAllocation([T; tauDesired], Rd, par);
+    uAlloc = sunDFBCAllocation([T; tauDesired], Rd, par);
 
     cmd.actuator = uAlloc.actuator;
     % Sun Eq. (32): retrieve the actually achievable collective thrust and
@@ -2805,9 +3108,9 @@ function [u, st] = sunINDIActuatorControl(x, cmd, t, par, st)
         h = max(t - st.t, par.sun.indiPeriod);
         rawActuator = st.actuator;
         [omegaF, st.omegaFilter] = secondOrderButterworthLPF( ...
-            x.Omega, st.omegaFilter, h, par.sun.filterCutoffHz);
+            x.Omega, st.omegaFilter, h, par.sun.innerLoopFilterCutoffHz);
         [actuatorF, st.actuatorFilter] = secondOrderButterworthLPF( ...
-            rawActuator, st.actuatorFilter, h, par.sun.filterCutoffHz);
+            rawActuator, st.actuatorFilter, h, par.sun.innerLoopFilterCutoffHz);
         omegaDotF = (omegaF - st.omegaF)/h;
         st.omegaF = omegaF;
     end
@@ -3012,8 +3315,8 @@ function u = controllerGeometricINDI(x, ref, t, par)
     %     T*b3 = T0*b30 - m*(aCmd-vDot0).
     %   Attitude/rate law:
     %     OmegaDotCmd = Ktheta*Log(R'*Rd)
-    %                   + Komega*(OmegaRef-Omega) + alphaRef
-    %     tau = tau0 + J*(OmegaDotCmd-OmegaDot0).
+    %                   + Komega*(OmegaRef-OmegaF) + alphaRef
+    %     tau = tau0F + J*(OmegaDotCmd-OmegaDot0F).
     ref = completeReferenceDerivatives(ref);
     % Position errors: ep = p_d-p, ev = v_d-v.
     ep = ref.p - x.p;
@@ -3021,7 +3324,8 @@ function u = controllerGeometricINDI(x, ref, t, par)
     % GINDI Eq. (56): aCmd = Kp*ep + Kv*ev + a_d.
     aCmd = par.geometric_indi.Kp*ep + par.geometric_indi.Kv*ev + ref.a;
 
-    if isempty(st) || t <= par.dt/2
+    resetState = isempty(st) || t <= par.dt/2 || t <= st.t;
+    if resetState
         % First sample uses direct inversion:
         %   thrustAxisForce = m*(g*e3-aCmd), T = ||thrustAxisForce||.
         thrustAxisForce = par.m*(par.g*par.e3 - aCmd);
@@ -3047,22 +3351,35 @@ function u = controllerGeometricINDI(x, ref, t, par)
         u.OmegaD = omegaRefBody;
         u.alphaD = alphaRefBody;
 
-        st = updateINDIState(x, u, t);
+        st = initGeometricINDIState(x, u, t, par);
         return;
     end
 
     h = max(t - st.t, par.dt);
-    % Measured increments:
-    %   vDot0 = (v-v0)/h, OmegaDot0 = (Omega-Omega0)/h.
-    vDot0 = (x.v - st.v)/h;
-    OmegaDot0 = (x.Omega - st.Omega)/h;
+    % Filtered feedback for the incremental terms. Direct finite differences
+    % of noisy v/Omega feedthrough as noise/h and destabilize the INDI update.
+    rawOmegaF = x.Omega;
+    [rawVDot0, rawOmegaDot0] = rigidBodyRates( ...
+        x.R, x.v, x.Omega, st.uApplied, par, t);
+    rawT_b_z0 = st.T * x.R*par.e3;
+    rawTau0 = st.tau;
+
+    [vDot0, st.vDotFilter] = secondOrderButterworthLPF( ...
+        rawVDot0, st.vDotFilter, h, par.geometric_indi.outerLoopFilterCutoffHz);
+    [omegaF, st.omegaFilter] = secondOrderButterworthLPF( ...
+        rawOmegaF, st.omegaFilter, h, par.geometric_indi.innerLoopFilterCutoffHz);
+    [OmegaDot0, st.omegaDotFilter] = secondOrderButterworthLPF( ...
+        rawOmegaDot0, st.omegaDotFilter, h, par.geometric_indi.innerLoopFilterCutoffHz);
+    [T_b_z0, st.thrustAxisForceFilter] = secondOrderButterworthLPF( ...
+        rawT_b_z0, st.thrustAxisForceFilter, h, par.geometric_indi.outerLoopFilterCutoffHz);
+    [tau0, st.tauFilter] = secondOrderButterworthLPF( ...
+        rawTau0, st.tauFilter, h, par.geometric_indi.innerLoopFilterCutoffHz);
 
     % GINDI Eq. (55): incremental virtual thrust-vector command:
     %   T_b_z = T0*b30 - m*(aCmd-vDot0).
-    T_b_z0 = st.T * st.R*par.e3;
     T_b_z = T_b_z0 - par.m*(aCmd - vDot0);
     cmd = geometricINDIReferenceCommand( ...
-        x, ref, T_b_z, st.T, par);
+        x, ref, T_b_z, norm(T_b_z0), par);
     T = cmd.T;
     Rd = cmd.Rd;
     omegaRefBody = cmd.omegaRefBody;
@@ -3071,25 +3388,25 @@ function u = controllerGeometricINDI(x, ref, t, par)
     rErr = LogSO3(x.R' * Rd);
     % GINDI Eq. (61): commanded angular acceleration.
     OmegaDotCmd = par.geometric_indi.Ktheta*rErr ...
-                + par.geometric_indi.Komega*(omegaRefBody - x.Omega) ...
+                + par.geometric_indi.Komega*(omegaRefBody - omegaF) ...
                 + alphaRefBody;
 
     % GINDI Eq. (60): incremental moment command.
-    tau = st.tau + par.J*(OmegaDotCmd - OmegaDot0);
+    tau = tau0 + par.J*(OmegaDotCmd - OmegaDot0);
 
     u = controlAllocation([T; tau], Rd, par);
     u.OmegaD = omegaRefBody;
     u.alphaD = alphaRefBody;
 
-    st = updateINDIState(x, u, t);
+    st = updateGeometricINDIState(st, x, u, t);
 end
 
 function cmd = geometricINDIReferenceCommand( ...
         x, ref, thrustAxisForce, TForRates, par)
 
-    % Sun Eq. (14)-(17) gives the same thrust-axis/yaw attitude construction
-    % used by this GINDI path. For reference angular velocity and angular
-    % acceleration, Sun Eq. (18)-(24) is better than the Tal route here.
+    % Sun Eq. (14)-(17) gives the thrust-axis/yaw attitude construction used
+    % by this GINDI path. Reference angular velocity/acceleration use Sun
+    % Eq. (18)-(24).
     T = norm(thrustAxisForce);
     if T < 1e-9
         % First singularity: the thrust axis is not defined. Keep the
@@ -3123,13 +3440,26 @@ function cmd = geometricINDIReferenceCommand( ...
     cmd.alphaRefBody = alphaRefBody;
 end
 
-function st = updateINDIState(x, u, t)
+function st = initGeometricINDIState(x, u, t, par)
+
+    [aApplied, omegaDotApplied] = rigidBodyRates( ...
+        x.R, x.v, x.Omega, u, par, t);
+    st.vDotFilter = initSecondOrderLPF(aApplied);
+    st.omegaFilter = initSecondOrderLPF(x.Omega);
+    st.omegaDotFilter = initSecondOrderLPF(omegaDotApplied);
+    st.thrustAxisForceFilter = initSecondOrderLPF(u.T*x.R*par.e3);
+    st.tauFilter = initSecondOrderLPF(u.tau);
+    st = updateGeometricINDIState(st, x, u, t);
+end
+
+function st = updateGeometricINDIState(st, x, u, t)
 
     st.v = x.v;
     st.R = x.R;
     st.Omega = x.Omega;
     st.T = u.T;
     st.tau = u.tau;
+    st.uApplied = u;
     st.t = t;
 end
 
@@ -3169,11 +3499,7 @@ function refs = onManifoldMPCReferences(ref, traj, t, par)
     h = par.lu.dt;
     for k = 2:N+1
         tk = t + (k-1)*h;
-        if isfield(traj, 'evalPredict')
-            refK = traj.evalPredict(tk);
-        else
-            refK = traj.eval(min(tk, par.Tend));
-        end
+        refK = predictionReferenceAtTime(traj, tk, par);
 
         ff = luFlatnessReference(refK, par);
         refs.p(:,k) = refK.p;

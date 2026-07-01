@@ -21,7 +21,6 @@ parser.addParameter("AcadosDir", fullfile(repoDir, ".acados", "acados"));
 parser.addParameter("Python", defaultAcadosPython());
 parser.addParameter("Jobs", defaultParallelJobs());
 parser.addParameter("RunSunSmokeTest", true);
-parser.addParameter("RunSmokeTest", []);
 parser.parse(varargin{:});
 opts = parser.Results;
 
@@ -29,9 +28,6 @@ acadosDir = char(string(opts.AcadosDir));
 buildDir = fullfile(acadosDir, "build");
 jobs = max(1, round(double(opts.Jobs)));
 runSunSmokeTest = logical(opts.RunSunSmokeTest);
-if ~isempty(opts.RunSmokeTest)
-    runSunSmokeTest = logical(opts.RunSmokeTest);
-end
 
 fprintf("acados local installation\n");
 fprintf("Repository: %s\n", repoDir);
@@ -48,7 +44,6 @@ setenv("ACADOS_SOURCE_DIR", acadosDir);
 setenv("ACADOS_INSTALL_DIR", acadosDir);
 if strlength(string(opts.Python)) > 0
     setenv("ACADOS_PYTHON", char(string(opts.Python)));
-    setenv("SUN_NMPC_PYTHON", char(string(opts.Python)));
 end
 
 setup_acados_python();
@@ -200,9 +195,6 @@ end
 function pythonExe = defaultAcadosPython()
 
 pythonExe = string(getenv("ACADOS_PYTHON"));
-if strlength(pythonExe) == 0
-    pythonExe = string(getenv("SUN_NMPC_PYTHON"));
-end
 end
 
 function [arch, isArm64] = machineArchitecture()

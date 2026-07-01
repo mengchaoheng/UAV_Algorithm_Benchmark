@@ -8,3 +8,5 @@ __pycache__/
 
 /results
 agilicious_internal_mine
+paper/main.pdf
+*.log
