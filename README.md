@@ -1,13 +1,26 @@
-UAV Algorithm Benchmark
-=======================
+Quadrotor Control Algorithm Benchmark
+=====================================
 
-A MATLAB-based UAV simulation framework for rapid validation and benchmarking
-of control and planning algorithms.
+A MATLAB-based quadrotor control simulation benchmark for comparing geometric
+control, differential-flatness-based control, INDI, and NMPC controllers under
+aggressive trajectories, measurement noise, and external disturbances.
 
 Coordinate convention: simulation states, controller references, and 3D plots
 use NED coordinates (`x` north, `y` east, `z` down). 3D figures reverse the
 z-axis direction and include a small NED reference triad so positive `z_NED`
 appears visually downward.
+
+Benchmark Trajectories And Example Results
+------------------------------------------
+
+The first figure shows the benchmark trajectories used in the sweep. The next
+two figures show example disturbance Monte Carlo results.
+
+![Benchmark trajectories used by the trajectory sweep](sources/sweep_traj_3d.png)
+
+![Example result: horizontal figure-eight disturbance benchmark](sources/mc_figure8_horizontal.png)
+
+![Example result: helix flip disturbance benchmark](sources/mc_helix_flip.png)
 
 Quick Start
 -----------
@@ -111,103 +124,44 @@ types are still available for paper comparisons and debugging.
 Sun NMPC Dependency Setup
 -------------------------
 
-The strict Sun et al. NMPC reproduction uses MATLAB as the simulation host and
-Python/acados as the nonlinear MPC solver generator/runtime:
-
-```text
-MATLAB main.m
-  -> controllerSunNMPC
-  -> MATLAB py.* bridge
-  -> tools/sun_acados_nmpc.py
-  -> acados SQP-RTI generated C solver
-  -> rotor thrusts u1..u4
-  -> MATLAB plant step
-```
-
-Required external tools:
-
-- MATLAB with Python support.
-- Command-line tools: `git`, `cmake`, and a C/C++ compiler.
-
-Recommended one-command acados install from MATLAB:
+Sun NMPC needs acados. Most users only need to run the installer once from
+MATLAB at the repository root:
 
 ```matlab
 install_acados
 ```
 
-This clones and builds acados, creates `.venv`, installs Python packages
-(`casadi`, `scipy`, `matplotlib`, `cython`, `Deprecated`, `acados_template`),
-downloads `bin/t_renderer`, and runs a short `sun_nmpc` smoke test to verify
-that this repository can call the generated acados solver. To skip that final
-algorithm-level check:
+The script installs acados under `.acados/acados`, creates the repository-local
+Python environment `.venv`, installs the required Python packages, and runs a
+short `sun_nmpc` smoke test. It automatically selects platform-specific build
+options for Apple Silicon and x86_64 machines.
+
+Before running it, make sure these tools are available:
+
+- MATLAB with Python support.
+- `git`, `cmake`, and a C/C++ compiler.
+
+To skip the final smoke test:
 
 ```matlab
 install_acados("RunSunSmokeTest", false)
 ```
 
-The default install is repository-local and ignored by git:
-
-```text
-.acados/acados   acados source/build/install tree
-.venv            Python environment used by MATLAB
-```
-
-The installer chooses platform-specific CMake options automatically. On Apple
-Silicon it uses `BLASFEO_TARGET=ARMV8A_APPLE_M1` and
-`CMAKE_OSX_ARCHITECTURES=arm64`; on x86_64 it uses acados'
-`X64_AUTOMATIC` target.
-
-The runtime code looks for Python in this order:
-
-1. `ACADOS_PYTHON`, when explicitly set.
-2. `.venv/bin/python3` under this repository.
-3. MATLAB's current/default Python, only if no project Python exists.
-
-Manual install, if you do not want to use `install_acados`:
-
-```bash
-mkdir -p .acados
-git clone --depth 1 --recurse-submodules https://github.com/acados/acados.git .acados/acados
-cmake -S .acados/acados -B .acados/acados/build -DACADOS_WITH_QPOASES=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=.acados/acados
-cmake --build .acados/acados/build --target install -j4
-```
-
-On Apple Silicon, add these CMake options to avoid accidentally building x86_64
-libraries:
-
-```bash
--DBLASFEO_TARGET=ARMV8A_APPLE_M1 -DCMAKE_OSX_ARCHITECTURES=arm64
-```
-
-For a non-default acados path, set it inside MATLAB before setup, especially
-when MATLAB is opened from the macOS Dock:
+After installation, restart MATLAB if Python was already loaded, `cd` back to
+this repository, and run the simulation:
 
 ```matlab
-setenv("ACADOS_SOURCE_DIR", "/path/to/acados")
+main
 ```
 
-Then start MATLAB, `cd` to this repository, and run:
+For a batch trajectory test:
 
 ```matlab
-setup_acados_python
+main_trajectory_sweep
 ```
 
-The setup script creates `.venv` when needed, installs the Python packages into
-that environment, installs `acados_template` from your acados checkout, and
-downloads `bin/t_renderer` when it is missing.
-
-If you want MATLAB to use a specific Python instead of `.venv`, set this before
-running MATLAB or before calling `setup_acados_python`:
-
-```matlab
-setenv("ACADOS_PYTHON", "/path/to/python3")
-```
-
-If you see an error like `No module named 'casadi'` and MATLAB reports
-`/Applications/Xcode.app/.../python3`, MATLAB has already loaded the wrong
-Python. Run `install_acados`, restart MATLAB, `cd` back to this
-repository, and run `main` or `main_trajectory_sweep` again. Parallel workers
-also use the same `.venv/bin/python3` path after restart.
+If MATLAB reports a Python package error such as `No module named 'casadi'`,
+restart MATLAB and run the simulation again so MATLAB uses `.venv/bin/python3`.
 
 Current Sun NMPC Architecture
 -----------------------------
@@ -249,32 +203,35 @@ cfg.errorEvalMode = "sun_prediction_horizon";
 Notes on Other MATLAB NMPC Repositories
 ---------------------------------------
 
-Several public MATLAB NMPC repositories were checked as possible alternatives.
-They are useful references, but most do not solve the core issue for strict Sun
-et al. reproduction:
+The Sun NMPC implementation in this repository follows the Sun et al. paper and
+the Agilicious/acados implementation style: generated acados solvers with
+SQP-RTI-like operation. 
 
-- `DeathstrokeN/matlab-drone-ekf-nmpc`: direct-shooting `fmincon`; useful for
-  simple MATLAB structure, not real-time Sun NMPC.
-- `FrancescoZ83/UAV-Trajectory-Tracking-Adaptive-NMPC-vs.-Observer-based-MPC`:
-  reports a `quadprog`-based nonlinear/adaptive MPC style; not the Sun acados
-  OCP.
-- `industoai/Nonlinear-Model-Predictive-Control`: educational `fmincon`
-  examples.
-- `Giapducnguyen/NMPC-Multiple-Shooting`: CasADi + IPOPT multiple shooting;
-  better modeling style than `fmincon`, but still not SQP-RTI/acados.
-- `kul-optec/nmpc-codegen-matlab`: code-generation/PANOC approach and the most
-  relevant pure MATLAB-adjacent alternative, but it targets older CasADi and
-  would require a separate port.
-- `mlazar04/sNMPC`: YALMIP/CasADi/IPOPT style stochastic NMPC toolbox; not a
-  direct quadrotor agile-flight reproduction.
-- `Chanho-Ko/NMPC-planning-simulink`: MATLAB `nlmpc`/Simulink workflow; useful
-  for planning examples, not real-time agile-flight NMPC.
-- `Murad275/nmpc_CarSim`: CasADi + IPOPT CarSim block; vehicle-focused.
-- `HybridRobotics/NMPC-DCLF-DCBF`: YALMIP + IPOPT safety-critical MPC/CBF
-  research code; not quadrotor Sun NMPC.
-- `CindiFeng/NMPC-SlungLoadQuad`: MATLAB `nlmpc` and `nlmpcMultistage`; useful
-  MATLAB toolbox reference, but not fast enough for this reproduction target.
+References
+----------
 
-For the Sun et al. result, acados remains the closest match because the
-Agilicious implementation also uses generated acados solvers with SQP-RTI-like
-operation.
+[1] T. Lee, M. Leok, and N. H. McClamroch, “Geometric Tracking Control of a Quadrotor UAV on SE(3),” Mar. 10, 2010, arXiv: arXiv:1003.2005. doi: [10.48550/arXiv.1003.2005](https://doi.org/10.48550/arXiv.1003.2005).
+
+[2] T. Lee, M. Leok, and N. H. McClamroch, “Control of Complex Maneuvers for a Quadrotor UAV using Geometric Methods on SE(3),” Nov. 12, 2010, arXiv: arXiv:1003.2005. doi: [10.48550/arXiv.1003.2005](https://doi.org/10.48550/arXiv.1003.2005).
+
+[3] F. Bullo and R. M. Murray, “Proportional derivative (PD) control on the Euclidean group,” 1995.
+
+[4] Y. Yu, S. Yang, M. Wang, C. Li, and Z. Li, “High performance full attitude control of a quadrotor on SO (3),” in 2015 IEEE International Conference on Robotics and Automation (ICRA), Seattle, WA, USA: IEEE, 2015, pp. 1698–1703. doi: [10.1109/icra.2015.7139416](https://doi.org/10.1109/icra.2015.7139416).
+
+[5] D. Brescianini, M. Hehn, and R. D’Andrea, “Nonlinear Quadrocopter Attitude Control: Technical Report,” ETH Zurich, 2013. doi: [10.3929/ETHZ-A-009970340](https://doi.org/10.3929/ETHZ-A-009970340).
+
+[6] M. Faessler, A. Franchi, and D. Scaramuzza, “Differential Flatness of Quadrotor Dynamics Subject to Rotor Drag for Accurate Tracking of High-Speed Trajectories,” IEEE Robotics and Automation Letters, vol. 3, no. 2, pp. 620–626, Apr. 2018, doi: [10.1109/LRA.2017.2776353](https://doi.org/10.1109/LRA.2017.2776353).
+
+[7] J. Sola, “Quaternion kinematics for the error-state Kalman filter,” arXiv:1711.02508 [cs], Nov. 2017, Accessed: Sep. 26, 2020. [Online]. Available: [http://arxiv.org/abs/1711.02508](http://arxiv.org/abs/1711.02508)
+
+[8] D. Brescianini and R. D’Andrea, “Tilt-Prioritized Quadrocopter Attitude Control,” IEEE Transactions on Control Systems Technology, vol. 28, no. 2, pp. 376–387, Mar. 2020, doi: [10.1109/TCST.2018.2873224](https://doi.org/10.1109/TCST.2018.2873224).
+
+[9] J. Johnson and R. Beard, “Globally-Attractive Logarithmic Geometric Control of a Quadrotor for Aggressive Trajectory Tracking,” Dec. 01, 2021, arXiv: arXiv:2109.07025. doi: [10.48550/arXiv.2109.07025](https://doi.org/10.48550/arXiv.2109.07025).
+
+[10] J. Sola, J. Deray, and D. Atchuthan, “A micro Lie theory for state estimation in robotics,” Dec. 08, 2021, arXiv: arXiv:1812.01537. doi: [10.48550/arXiv.1812.01537](https://doi.org/10.48550/arXiv.1812.01537).
+
+[11] E. Tal and S. Karaman, “Accurate Tracking of Aggressive Quadrotor Trajectories Using Incremental Nonlinear Dynamic Inversion and Differential Flatness,” IEEE Trans. Contr. Syst. Technol., vol. 29, no. 3, pp. 1203–1218, May 2021, doi: [10.1109/tcst.2020.3001117](https://doi.org/10.1109/tcst.2020.3001117).
+
+[12] S. Sun, A. Romero, P. Foehn, E. Kaufmann, and D. Scaramuzza, “A Comparative Study of Nonlinear MPC and Differential-Flatness-Based Control for Quadrotor Agile Flight,” Feb. 23, 2022, arXiv: arXiv:2109.01365. Accessed: May 27, 2022. [Online]. Available: [http://arxiv.org/abs/2109.01365](http://arxiv.org/abs/2109.01365)
+
+[13] G. Lu, W. Xu, and F. Zhang, “On-Manifold Model Predictive Control for Trajectory Tracking on Robotic Systems,” IEEE Transactions on Industrial Electronics, vol. 70, no. 9, pp. 9192–9202, Sep. 2023, doi: [10.1109/TIE.2022.3212397](https://doi.org/10.1109/TIE.2022.3212397).

@@ -13,8 +13,8 @@ clear; clc; close all;
 figuresToMake = ["disturbance_monte_carlo", "trajectory_sweep_3d"];
 
 outputDir = fullfile(pwd, "results", "paper_figures");
-savePdf = false;
-savePng = false;
+savePdf = true;
+savePng = true;
 
 %% ========================================================================
 %% 2. Global paper style
