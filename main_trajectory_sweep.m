@@ -30,8 +30,8 @@ end
 % "tal", "geometric_indi"
 controllerName = "geometric_indi";
 
-trajNames = ["figure8_horizontal", ...
-    "helix_flip"];
+trajNames = ["figure8_horizontal", "figure8_vertical", ...
+    "helix_flip", "flip_loop_sine", "fast_circle"];
 % trajNames = ["figure8_horizontal"];
 % trajNames = "all";
 % trajNames = ["helix_flip"];
