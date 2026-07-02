@@ -3,7 +3,7 @@ function install_acados(varargin)
 %
 % Usage:
 %   install_acados
-%   install_acados("RunSunSmokeTest", false)
+%   install_acados("RunNMPCTest", false)
 %   install_acados("AcadosDir", "/path/to/acados")
 %   install_acados("Python", "/path/to/python3")
 %
@@ -20,14 +20,14 @@ parser = inputParser;
 parser.addParameter("AcadosDir", fullfile(repoDir, ".acados", "acados"));
 parser.addParameter("Python", defaultAcadosPython());
 parser.addParameter("Jobs", defaultParallelJobs());
-parser.addParameter("RunSunSmokeTest", true);
+parser.addParameter("RunNMPCTest", true);
 parser.parse(varargin{:});
 opts = parser.Results;
 
 acadosDir = char(string(opts.AcadosDir));
 buildDir = fullfile(acadosDir, "build");
 jobs = max(1, round(double(opts.Jobs)));
-runSunSmokeTest = logical(opts.RunSunSmokeTest);
+runNMPCTest = logical(opts.RunNMPCTest);
 
 fprintf("acados local installation\n");
 fprintf("Repository: %s\n", repoDir);
@@ -48,8 +48,8 @@ end
 
 setup_acados_python();
 
-if runSunSmokeTest
-    runSunNMPCSmokeTest(repoDir);
+if runNMPCTest
+    runNMPCVerificationTest(repoDir);
 end
 
 fprintf("acados is installed and ready for this repository.\n");
@@ -151,9 +151,9 @@ else
 end
 end
 
-function runSunNMPCSmokeTest(repoDir)
+function runNMPCVerificationTest(repoDir)
 
-fprintf("Running short sun_nmpc smoke test...\n");
+fprintf("Running short NMPC verification test...\n");
 clear("main");
 
 UAV_BENCHMARK_BATCH = true; %#ok<NASGU>
@@ -175,7 +175,7 @@ override.sun.acadosCodegenDir = tempname(tempdir);
 UAV_BENCHMARK_PAR_OVERRIDE = override; %#ok<NASGU>
 
 run(fullfile(repoDir, "main.m"));
-fprintf("sun_nmpc smoke test passed.\n");
+fprintf("NMPC verification test passed.\n");
 end
 
 function ensureCommandAvailable(versionCommand, commandName)

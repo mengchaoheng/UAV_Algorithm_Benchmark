@@ -2547,6 +2547,8 @@ function u = controllerSunNMPC(x, ~, traj, t, par)
     % NMPC as the high-level block feeding INDI, and Sec. V/VI run the NMPC
     % OCP at 100 Hz; NMPC+INDI adds the Eq. (32)-(35) angular-acceleration
     % INDI loop at par.sun.indiPeriod.
+    % Solver details, constraints, horizon, and cost weights are configured
+    % through par.sun and implemented in tools/sun_acados_nmpc.py.
     cfg = par.sun;
     N = cfg.N;
     h = cfg.dt;

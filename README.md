@@ -1,9 +1,13 @@
 Quadrotor Control Algorithm Benchmark
 =====================================
 
-A MATLAB-based quadrotor control simulation benchmark for comparing geometric
-control, differential-flatness-based control, INDI, and NMPC controllers under
-aggressive trajectories, measurement noise, and external disturbances.
+A MATLAB-based simulation benchmark for underactuated UAV control algorithms,
+with the current examples focused on quadrotors. The framework compares
+geometric control, differential-flatness-based control, INDI, and NMPC under
+aggressive trajectories, measurement noise, and external disturbances. Actuator
+dynamics are ignored, and different UAV platforms are represented mainly through
+their control-allocation model, so the same benchmark structure can be used for
+a broad class of underactuated UAVs.
 
 Coordinate convention: simulation states, controller references, and 3D plots
 use NED coordinates (`x` north, `y` east, `z` down). 3D figures reverse the
@@ -78,17 +82,17 @@ when plotting is enabled.
 `main.m` currently defaults to:
 
 ```matlab
-par.controllerName = "px4_iris";
+par.controllerName = "geometric";
 ```
 
-To run Sun et al. NMPC in a single case, set:
+To run the NMPC controller based on [12] in a single case, set:
 
 ```matlab
 par.controllerName = "sun_nmpc";
 ```
 
 `main_trajectory_sweep.m` is configured to sweep `sun_nmpc` by default.
-The Sun NMPC path is acados-backed; it is not a pure MATLAB implementation.
+The NMPC path is acados-backed; it is not a pure MATLAB implementation.
 
 Noise And Disturbances
 ----------------------
@@ -105,8 +109,8 @@ attitude, and body-rate white-noise standard deviations are configured under
 `par.feedbackNoise`.
 
 INDI controllers should not finite-difference noisy velocity/rate feedback
-directly. Tal, Sun `*_indi`, and `geometric_indi` inner-loop INDI filters all
-use `par.indi.innerLoopFilterCutoffHz`. Tal and `geometric_indi` outer-loop
+directly. `tal`, `sun_*_indi`, and `geometric_indi` inner-loop INDI filters all
+use `par.indi.innerLoopFilterCutoffHz`. `tal` and `geometric_indi` outer-loop
 INDI filters use `par.indi.outerLoopFilterCutoffHz`.
 
 The default plant disturbance is stochastic:
@@ -121,11 +125,11 @@ white noise is filtered by a correlation time, then scaled by the configured
 RMS force and moment levels. Deterministic `"constant"` and `"sin"` disturbance
 types are still available for paper comparisons and debugging.
 
-Sun NMPC Dependency Setup
--------------------------
+NMPC Dependency Setup
+---------------------
 
-Sun NMPC needs acados. Most users only need to run the installer once from
-MATLAB at the repository root:
+The NMPC controller based on [12] needs acados. Most users only need to run the
+installer once from MATLAB at the repository root:
 
 ```matlab
 install_acados
@@ -133,18 +137,18 @@ install_acados
 
 The script installs acados under `.acados/acados`, creates the repository-local
 Python environment `.venv`, installs the required Python packages, and runs a
-short `sun_nmpc` smoke test. It automatically selects platform-specific build
-options for Apple Silicon and x86_64 machines.
+short NMPC verification test (`sun_nmpc`). It automatically selects
+platform-specific build options for Apple Silicon and x86_64 machines.
 
 Before running it, make sure these tools are available:
 
 - MATLAB with Python support.
 - `git`, `cmake`, and a C/C++ compiler.
 
-To skip the final smoke test:
+To skip the final NMPC verification test:
 
 ```matlab
-install_acados("RunSunSmokeTest", false)
+install_acados("RunNMPCTest", false)
 ```
 
 After installation, restart MATLAB if Python was already loaded, `cd` back to
@@ -162,50 +166,6 @@ main_trajectory_sweep
 
 If MATLAB reports a Python package error such as `No module named 'casadi'`,
 restart MATLAB and run the simulation again so MATLAB uses `.venv/bin/python3`.
-
-Current Sun NMPC Architecture
------------------------------
-
-The implemented NMPC is in [tools/sun_acados_nmpc.py](tools/sun_acados_nmpc.py).
-It follows the Sun/Agilicious Kingfisher platform parameters used in `main.m`:
-
-- State: `x = [p(3); q_wxyz(4); v(3); Omega(3)]`.
-- Input: four rotor thrusts `u = [u1; u2; u3; u4]`.
-- Allocation map: `G*u = [T; tau_x; tau_y; tau_z]`.
-- Horizon: `N = 20`, `dt = 0.05 s`.
-- Solver: acados `SQP_RTI`, ERK integration, Gauss-Newton Hessian.
-- Input bounds: `0 <= ui <= 8.5 N`.
-- Body-rate bounds: `|Omega| <= [10, 10, 4] rad/s`.
-- Stage cost:
-  - position weights `[200, 200, 500]`;
-  - velocity weights `[1, 1, 1]`;
-  - tilt/yaw attitude residual weights `[5, 5, 200]`;
-  - body-rate weights `[1, 1, 1]`;
-  - rotor thrust weights `6*I`.
-
-The public Sun NMPC controller names are:
-
-- `sun_nmpc`: the Sun et al. Eq. (10) nonlinear MPC OCP, solved through
-  acados/SQP-RTI internally.
-- `sun_nmpc_indi`: the same NMPC outer loop combined with the Sun et al. INDI
-  inner loop for disturbance robustness.
-
-acados is an implementation detail of `sun_nmpc`, not a different algorithm.
-For NMPC, the internal prediction reference is allowed to continue past
-`par.Tend` by the controller horizon, while the MATLAB simulation still stops
-exactly at `par.Tend`. The disturbance benchmark can exclude the last
-prediction horizon from statistics with:
-
-```matlab
-cfg.errorEvalMode = "sun_prediction_horizon";
-```
-
-Notes on Other MATLAB NMPC Repositories
----------------------------------------
-
-The Sun NMPC implementation in this repository follows the Sun et al. paper and
-the Agilicious/acados implementation style: generated acados solvers with
-SQP-RTI-like operation. 
 
 References
 ----------
