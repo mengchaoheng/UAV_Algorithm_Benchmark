@@ -40,8 +40,8 @@ P.controllerOrder = ["lee", "johnson", "lu", ...
     "sun_dfbc", "sun_dfbc_indi", "sun_nmpc", "sun_nmpc_indi", ...
     "tal", "geometric_indi"];
 
-P.controllerLabel.lee = "GC";
-P.controllerLabel.johnson = "Log-GC";
+P.controllerLabel.lee = "Geometric Control";
+P.controllerLabel.johnson = "Log-Geometric Control";
 P.controllerLabel.lu = "On-Manifold MPC";
 P.controllerLabel.sun_dfbc = "DFBC";
 P.controllerLabel.sun_dfbc_indi = "DFBC+INDI";
