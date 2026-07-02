@@ -102,7 +102,7 @@ par.raceTrackMaxSpeed = 19.4; % [m/s], Sun Table VI Race Track C Vmax
 % "sun_dfbc", "sun_dfbc_indi"
 % "lu", "sun_nmpc", "sun_nmpc_indi"
 % "tal", "geometric_indi"
-par.controllerName = "px4_iris";
+par.controllerName = "tal";
 % Shared acceleration-level gains, using Sun et al. Table I DFBC values as
 % the benchmark default. Kp/Kv command linear acceleration; KR/KOmega
 % command angular acceleration. Controllers that output force/moment convert
@@ -310,25 +310,25 @@ par.tal.outerLoopFilterCutoffHz = par.indi.outerLoopFilterCutoffHz;
 % deliberately challenging state-estimate RMS levels, not raw sensor noise.
 % The plant state x remains true; controllers get xMeas.
 par.feedbackNoise.enabled = true;
-par.feedbackNoise.seed = 4301;
+par.feedbackNoise.seed = 1801248224;
 par.feedbackNoise.positionStd = [0.08; 0.08; 0.1];       % [m]
 par.feedbackNoise.velocityStd = [0.04; 0.04; 0.04];       % [m/s]
 par.feedbackNoise.attitudeStd = deg2rad([0.034; 0.034; 0.068]); % [rad]
 par.feedbackNoise.omegaStd = deg2rad([0.01; 0.01; 0.01]);    % [rad/s]
 
 % Additive plant disturbances. main.m defaults to the disturbance benchmark's
-% medium random_gust case. Set enabled=false for the no-disturbance baseline.
+% high random_gust case. Set enabled=false for the no-disturbance baseline.
 % When enabled, type must be "constant", "sin", or "random".
 % The force disturbance is expressed in inertial NED coordinates [N]; the
 % moment disturbance is expressed in the body frame [N*m].
 par.disturbance.enabled = true;
 par.disturbance.type = "random";
-par.disturbance.seed = 2401;
+par.disturbance.seed = 2042294704;
 par.disturbance.sampleTime = par.dt;
 % For constant/sin, these are amplitudes. For random, they are stationary
 % RMS levels of a first-order Gauss-Markov gust/load process.
-par.disturbance.forceAmp = [0.30; 0.30; 0.15];      % [Fx; Fy; Fz] [N]
-par.disturbance.momentAmp = [0.050; 0.050; 0.005];  % [Mx; My; Mz] [N*m]
+par.disturbance.forceAmp = [0.45; 0.45; 0.22];      % [Fx; Fy; Fz] [N]
+par.disturbance.momentAmp = [0.080; 0.080; 0.008];  % [Mx; My; Mz] [N*m]
 par.disturbance.forceFreq = [0.17; 0.23; 0.31];   % sinusoid frequencies [Hz]
 par.disturbance.momentFreq = [0.19; 0.29; 0.37];  % sinusoid frequencies [Hz]
 par.disturbance.forcePhase = [0; 1*pi/3; 2*pi/3];

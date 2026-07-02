@@ -28,10 +28,10 @@ end
 % "sun_dfbc", "sun_dfbc_indi"
 % "lu", "sun_nmpc", "sun_nmpc_indi"
 % "tal", "geometric_indi"
-controllerName = "sun_dfbc";
+controllerName = "geometric_indi";
 
-trajNames = ["figure8_horizontal", "figure8_vertical", ...
-    "helix_flip", "flip_loop_sine", "fast_circle"];
+trajNames = ["figure8_horizontal", ...
+    "helix_flip"];
 % trajNames = ["figure8_horizontal"];
 % trajNames = "all";
 % trajNames = ["helix_flip"];
@@ -47,7 +47,7 @@ useParallel = true;
 numWorkers = [];
 
 makePlots = true;
-savePlots = false;
+savePlots = true;
 plotStateDetail = true;       % single-trajectory only.
 keepFigureWindows = true;
 

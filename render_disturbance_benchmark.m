@@ -49,6 +49,7 @@ function figureFiles = render_disturbance_benchmark( ...
     end
 
     opts = plotDisturbanceOptions(results, cfg, matPath, args);
+    reportFailureExclusions(results, opts);
     if opts.savePlots
         prepareFigureDir(opts.outputDir);
     end
@@ -60,7 +61,7 @@ function figureFiles = render_disturbance_benchmark( ...
         mask = results.Trajectory == trajName ...
             & ismember(results.Controller, opts.controllerNames) ...
             & ismember(results.DisturbanceLevel, opts.levelNames) ...
-            & results.IsFinite;
+            & includedTrialMask(results, opts);
         if ~any(mask)
             continue;
         end
@@ -109,6 +110,8 @@ function opts = plotDisturbanceOptions(results, cfg, matPath, args)
     opts.outputDir = defaultOutputDir(results, matPath);
     opts.resolution = 200;
     opts.boxDataSource = string(getCfgField(cfg, 'boxDataSource', "time_error"));
+    opts.failureRmseThreshold = scalarThreshold(getCfgField(cfg, ...
+        'failureRmseThreshold', inf));
     opts.trajectoryOrder = string(getCfgField(cfg, 'trajNames', ...
         unique(results.Trajectory, 'stable')));
     opts.controllerOrder = string(getCfgField(cfg, 'controllerNames', ...
@@ -132,6 +135,8 @@ function opts = plotDisturbanceOptions(results, cfg, matPath, args)
                 opts.resolution = double(value);
             case "boxdatasource"
                 opts.boxDataSource = string(value);
+            case "failurermsethreshold"
+                opts.failureRmseThreshold = scalarThreshold(value);
             case {"trajnames", "trajectorynames"}
                 opts.trajectoryNames = selectedNames(value, ...
                     unique(results.Trajectory, 'stable'));
@@ -165,6 +170,54 @@ function opts = plotDisturbanceOptions(results, cfg, matPath, args)
     opts.levelOrder = appendMissing(opts.levelOrder, ...
         unique(results.DisturbanceLevel(ismember(results.DisturbanceLevel, ...
         opts.levelNames)), 'stable'));
+end
+
+function mask = includedTrialMask(results, opts)
+
+    mask = results.IsFinite;
+
+    if isfinite(opts.failureRmseThreshold)
+        mask = mask & isfinite(results.RMSE) ...
+            & results.RMSE <= opts.failureRmseThreshold;
+    end
+end
+
+function reportFailureExclusions(results, opts)
+
+    if ~isfinite(opts.failureRmseThreshold)
+        return;
+    end
+
+    selectedMask = ismember(results.Trajectory, opts.trajectoryNames) ...
+        & ismember(results.Controller, opts.controllerNames) ...
+        & ismember(results.DisturbanceLevel, opts.levelNames) ...
+        & results.IsFinite;
+    failedMask = selectedMask & isfinite(results.RMSE) ...
+        & results.RMSE > opts.failureRmseThreshold;
+
+    if ~any(failedMask)
+        fprintf('No trials excluded by RMSE failure threshold %.4g m.\n', ...
+            opts.failureRmseThreshold);
+        return;
+    end
+
+    failed = results(failedMask, {'Trajectory', 'Controller', ...
+        'DisturbanceLevel', 'Repeat', 'RMSE', 'MaxError', 'FinalError'});
+
+    fprintf(['Excluding %d failed trial(s) from plots because ' ...
+        'RMSE > %.4g m:\n'], height(failed), opts.failureRmseThreshold);
+    disp(failed);
+end
+
+function value = scalarThreshold(value)
+
+    value = double(value);
+
+    if isempty(value)
+        value = inf;
+    elseif ~isscalar(value)
+        error("FailureRmseThreshold must be a scalar 3-D position RMSE threshold in meters.");
+    end
 end
 
 function names = selectedNames(value, defaultNames)

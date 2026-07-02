@@ -21,7 +21,7 @@ function figureFiles = render_main_trajectory_sweep(varargin)
         prepareFigureDir(opts.outputDir);
     end
 
-    fig = plotSweepTrajectory3D(data);
+    fig = plotSweepTrajectory3D(data, opts);
     if opts.savePlots
         figureFiles(end+1,1) = saveSweepFigure(fig, ...
             opts.outputDir, 'sweep_traj_3d', opts.resolution);
@@ -106,7 +106,7 @@ function tf = isSweepOptionName(name)
 
     names = ["saveplots", "outputdir", "resolution", "clearoutput", ...
         "keepfigurewindows", "animationspeed", "animationframedt", ...
-        "trajnames", "trajectorynames"];
+        "trajnames", "trajectorynames", "figuresize"];
     tf = ismember(lower(string(name)), names);
 end
 
@@ -119,6 +119,7 @@ function opts = sweepPlotOptions(results, cfg, args)
     opts.keepFigureWindows = true;
     opts.animationSpeed = [];
     opts.animationFrameDt = [];
+    opts.figureSize = [];
     opts.trajNames = unique(results.Trajectory, 'stable');
 
     i = 1;
@@ -141,6 +142,8 @@ function opts = sweepPlotOptions(results, cfg, args)
                 opts.animationSpeed = double(value);
             case "animationframedt"
                 opts.animationFrameDt = double(value);
+            case "figuresize"
+                opts.figureSize = figureSizeValue(value);
             case {"trajnames", "trajectorynames"}
                 opts.trajNames = selectedSweepNames(value, ...
                     unique(results.Trajectory, 'stable'));
@@ -167,6 +170,44 @@ function names = selectedSweepNames(value, defaultNames)
         names = string(defaultNames);
     end
     names = names(:);
+end
+
+function value = figureSizeValue(value)
+
+    value = double(value);
+    if isempty(value)
+        value = [];
+        return;
+    end
+
+    value = value(:).';
+    if numel(value) ~= 2 || any(~isfinite(value)) || any(value <= 0)
+        error('FigureSize must be empty or [width height] in pixels.');
+    end
+end
+
+function fig = createSweepFigure(name, rows, cols, opts)
+
+    fig = figure('Color', 'w', 'Name', name, 'Units', 'pixels');
+
+    figSize = opts.figureSize;
+    if isempty(figSize)
+        figSize = defaultSweepFigureSize(rows, cols);
+    end
+
+    fig.Position = [80, 80, figSize(1), figSize(2)];
+    fig.PaperPositionMode = 'auto';
+    fig.InvertHardcopy = 'off';
+end
+
+function figSize = defaultSweepFigureSize(rows, cols)
+
+    tileWidth = 560;
+    tileHeight = 430;
+    titleHeight = 70;
+
+    figSize = [max(1100, cols*tileWidth), ...
+               max(760, rows*tileHeight + titleHeight)];
 end
 
 function outputDir = defaultSweepFigureDir(results, cfg)
@@ -200,10 +241,10 @@ function data = loadSweepRunData(results)
     data = data(1:nData);
 end
 
-function fig = plotSweepTrajectory3D(data)
+function fig = plotSweepTrajectory3D(data, opts)
 
-    fig = figure('Color', 'w', 'Name', 'sweep_traj_3d');
     [rows, cols] = subplotGrid(numel(data));
+    fig = createSweepFigure('sweep_traj_3d', rows, cols, opts);
     tl = tiledlayout(fig, rows, cols, 'TileSpacing', 'compact', ...
         'Padding', 'compact');
     title(tl, 'sweep_traj_3d', 'Interpreter', 'none');
@@ -227,8 +268,8 @@ end
 
 function fig = animateSweepTrajectories3D(data, opts)
 
-    fig = figure('Color', 'w', 'Name', 'sweep_anim_3d');
     [rows, cols] = subplotGrid(numel(data));
+    fig = createSweepFigure('sweep_anim_3d', rows, cols, opts);
     tl = tiledlayout(fig, rows, cols, 'TileSpacing', 'compact', ...
         'Padding', 'compact');
     title(tl, 'sweep_anim_3d', 'Interpreter', 'none');

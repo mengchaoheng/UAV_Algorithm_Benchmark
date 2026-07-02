@@ -21,11 +21,12 @@ controllerName = "latest";
 trajectoryName = "";
 
 % Leave empty to include all saved trajectories in the combined sweep plot.
-trajNames = strings(0,1);
+trajNames = ["figure8_horizontal", "helix_flip"];
 
 savePlots = true;
 resolution = 200;
 keepFigureWindows = true;
+figureSize = []; % [width height] pixels. Empty uses an automatic sweep size.
 
 %% ========================================================================
 %% Replot
@@ -66,6 +67,7 @@ else
         "SavePlots", savePlots, ...
         "Resolution", resolution, ...
         "TrajNames", trajNames, ...
+        "FigureSize", figureSize, ...
         "KeepFigureWindows", keepFigureWindows);
 
     disp("Replotted trajectory sweep result:");

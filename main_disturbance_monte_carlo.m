@@ -35,6 +35,11 @@ controllerRepeats = struct();
 % This script plots one RMSE sample per repeated simulation.
 boxDataSource = "rmse";
 
+% A repeated trial is treated as failed, and excluded from the plotted
+% boxchart, if its 3-D position RMSE exceeds this threshold. Sun et al. use
+% 5 m for failure counting. Set to inf to keep every finite trial.
+failureRmseThreshold = 5; % [m]
+
 %% ========================================================================
 %% 2. Disturbance Scenario
 
@@ -81,6 +86,7 @@ cfg.disturbanceSeedBase = d.disturbanceSeedBase;
 cfg.numRepeats = numRepeats;
 cfg.controllerRepeats = controllerRepeats;
 cfg.boxDataSource = boxDataSource;
+cfg.failureRmseThreshold = failureRmseThreshold;
 
 cfg.makePlots = makePlots;
 cfg.savePlots = savePlots;

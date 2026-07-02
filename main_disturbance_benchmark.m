@@ -178,6 +178,11 @@ end
 makePlots = true;
 savePlots = true;
 
+% A simulation row is treated as failed, and excluded from the plotted
+% boxchart, if its 3-D position RMSE exceeds this threshold. Sun et al. use
+% 5 m for failure counting. Set to inf to keep every finite run.
+failureRmseThreshold = 5; % [m]
+
 %% ========================================================================
 %% 3. Simulation Settings
 
@@ -218,6 +223,7 @@ cfg.disturbanceSeedBase = disturbanceSeedBase;
 
 cfg.makePlots = makePlots;
 cfg.savePlots = savePlots;
+cfg.failureRmseThreshold = failureRmseThreshold;
 
 cfg.integratorName = integratorName;
 cfg.useParallel = useParallel;
